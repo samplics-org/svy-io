@@ -3,45 +3,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-fn bindgen_with_includes(include_dir: &Path) {
-    let builder = bindgen::Builder::default()
-        .header("wrapper.h")
-        .allowlist_function("readstat_.*")
-        .allowlist_type("readstat_.*")
-        .allowlist_var("READSTAT_.*")
-        .layout_tests(false)
-        .clang_arg(format!("-I{}", include_dir.display()));
-
-    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
-    builder
-        .generate()
-        .expect("bindgen failed for readstat")
-        .write_to_file(out.join("bindings.rs"))
-        .expect("Couldn't write bindings!");
-    println!("cargo:rerun-if-changed=wrapper.h");
-}
-
-fn find_readstat_dir() -> Option<PathBuf> {
-    if let Some(p) = env::var_os("READSTAT_SRC") {
-        let p = PathBuf::from(p);
-        if p.join("src/readstat.h").exists() {
-            return Some(p);
-        }
-    }
-    let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let vendored = crate_dir.join("third_party/readstat");
-    if vendored.join("src/readstat.h").exists() {
-        return Some(vendored);
-    }
-    if let Some(root) = crate_dir.parent().and_then(|p| p.parent()) {
-        let root_readstat = root.join("ReadStat");
-        if root_readstat.join("src/readstat.h").exists() {
-            return Some(root_readstat);
-        }
-    }
-    None
-}
-
 fn build_vendored(rs_dir: &Path) {
     let src_dir = rs_dir.join("src");
     let inc_dir = rs_dir.join("src");
@@ -51,16 +12,16 @@ fn build_vendored(rs_dir: &Path) {
         src_dir.display()
     );
 
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap()); // <-- add
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     let mut build = cc::Build::new();
 
-    // Put OUT_DIR first so our stub headers win on Windows
-    build.include(&out_dir); // <-- add
+    // Our stubs first
+    build.include(&out_dir);
     build.include(&inc_dir);
     build.include(&rs_dir);
 
-    // Minimal config.h stand-ins
+    // Minimal config.h-like defines
     build.define("HAVE_STDDEF_H", Some("1"));
     build.define("HAVE_STDINT_H", Some("1"));
     build.define("HAVE_INTTYPES_H", Some("1"));
@@ -68,7 +29,7 @@ fn build_vendored(rs_dir: &Path) {
     build.define("HAVE_STRING_H", Some("1"));
     build.define("HAVE_STRINGS_H", Some("1"));
 
-    // zlib: off on Windows (we also skip zsav/sav_compress sources below)
+    // zlib toggling: disable on Windows to avoid external deps in CI
     let has_zlib = !cfg!(target_os = "windows");
     if has_zlib {
         build.define("READSTAT_HAVE_ZLIB", Some("1"));
@@ -79,11 +40,9 @@ fn build_vendored(rs_dir: &Path) {
         build.define("HAVE_ZLIB", Some("0"));
     }
 
-    // iconv availability + stub header for Windows
+    // iconv: provide stub header on Windows
     if cfg!(target_os = "windows") {
         build.define("HAVE_ICONV", Some("0"));
-
-        // Write a minimal iconv.h so readstat_iconv.h can #include it
         let stub = out_dir.join("iconv.h");
         fs::write(
             &stub,
@@ -91,7 +50,7 @@ fn build_vendored(rs_dir: &Path) {
 #ifndef ICONV_STUB_H
 #define ICONV_STUB_H
 #include <stddef.h>
-typedef int iconv_t; /* enough to satisfy type references; functions not provided */
+typedef void* iconv_t; /* pointer type to match usage */
 #endif
 "#,
         )
@@ -102,23 +61,28 @@ typedef int iconv_t; /* enough to satisfy type references; functions not provide
         println!("cargo:rustc-link-lib=iconv");
     }
 
-    // Force-include readstat.h for all TUs
+    // Force-include public header in every TU
     if cfg!(target_env = "msvc") {
         build.flag("/FIreadstat.h");
     } else {
         build.flag("-include").flag("readstat.h");
     }
 
-    // Collect C files (skip tests/fuzz/bin/txt and zlib files when no zlib)
+    // Gather C sources
     let mut files: Vec<PathBuf> = Vec::new();
     for entry in walkdir::WalkDir::new(&src_dir) {
         let entry = entry.unwrap();
         let p = entry.path();
-        if !entry.file_type().is_file() || p.extension().and_then(|s| s.to_str()) != Some("c") {
+        if !entry.file_type().is_file() {
             continue;
         }
+        if p.extension().and_then(|s| s.to_str()) != Some("c") {
+            continue;
+        }
+
         let rel = p.strip_prefix(&src_dir).unwrap();
 
+        // Skip bin/, fuzz/, test(s)/, txt/ anywhere in the path
         let skip_dir = rel.components().any(|c| {
             matches!(
                 c.as_os_str().to_str(),
@@ -129,9 +93,8 @@ typedef int iconv_t; /* enough to satisfy type references; functions not provide
             continue;
         }
 
+        // Platform I/O backend
         let name = rel.file_name().and_then(|s| s.to_str()).unwrap_or("");
-
-        // Platform IO backend
         if cfg!(target_os = "windows") {
             if name == "readstat_io_unistd.c" {
                 continue;
@@ -140,14 +103,14 @@ typedef int iconv_t; /* enough to satisfy type references; functions not provide
             continue;
         }
 
-        // Skip zlib-using sources if zlib is off
+        // Drop zlib users when zlib is off (Windows)
         if !has_zlib {
-            let rel_str = rel.to_string_lossy();
-            if rel_str.ends_with("spss/readstat_zsav_compress.c")
-                || rel_str.ends_with("spss/readstat_zsav_read.c")
-                || rel_str.ends_with("spss/readstat_zsav_write.c")
-                || rel_str.ends_with("spss/readstat_sav_compress.c")
+            if name == "readstat_zsav_compress.c"
+                || name == "readstat_zsav_read.c"
+                || name == "readstat_zsav_write.c"
+                || name == "readstat_sav_compress.c"
             {
+                // println!("Skipping zlib user: {}", rel.display());
                 continue;
             }
         }
@@ -163,55 +126,8 @@ typedef int iconv_t; /* enough to satisfy type references; functions not provide
     build.define("READSTAT_VERSION", Some("\"vendored\""));
     build.warnings(false).compile("readstat");
 
-    // Bindings + link the produced static lib
+    // Bindgen + link
     bindgen_with_includes(&inc_dir);
     println!("cargo:rustc-link-lib=static=readstat");
     println!("cargo:rustc-link-search=native={}", out_dir.display());
-}
-
-fn link_from_prefix(prefix: &str) {
-    println!("cargo:rustc-link-search=native={prefix}/lib");
-    println!("cargo:rustc-link-lib=readstat");
-    println!("cargo:rustc-link-lib=z");
-    #[cfg(target_os = "macos")]
-    println!("cargo:rustc-link-lib=iconv");
-    println!("cargo:include={prefix}/include");
-    bindgen_with_includes(&PathBuf::from(format!("{prefix}/include")));
-}
-
-fn link_from_pkg_config() -> bool {
-    if pkg_config::Config::new().probe("readstat").is_ok() {
-        bindgen_with_includes(Path::new("."));
-        true
-    } else {
-        false
-    }
-}
-
-fn main() {
-    if cfg!(feature = "vendored") {
-        if let Some(dir) = find_readstat_dir() {
-            build_vendored(&dir);
-            return;
-        }
-        panic!(
-            "`vendored` enabled but could not find ReadStat sources. \
-             Set READSTAT_SRC, or add a submodule at \
-             native/readstat-sys/third_party/readstat or ./ReadStat"
-        );
-    }
-
-    if link_from_pkg_config() {
-        return;
-    }
-    if let Ok(prefix) = env::var("READSTAT_PREFIX") {
-        link_from_prefix(&prefix);
-        return;
-    }
-    if let Ok(home) = env::var("HOME") {
-        link_from_prefix(&format!("{home}/.local"));
-        return;
-    }
-
-    panic!("Unable to locate ReadStat: enable feature `vendored`, install via pkg-config, or set READSTAT_PREFIX.");
 }
