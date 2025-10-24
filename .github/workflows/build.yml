@@ -33,6 +33,7 @@ jobs:
         run: |
           brew update
           brew install llvm
+
       - name: Export LLVM env (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -44,6 +45,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: choco install -y llvm
+
       - name: Export LLVM env (Windows)
         if: runner.os == 'Windows'
         shell: powershell
@@ -51,29 +53,12 @@ jobs:
           # bindgen looks for libclang.dll in this dir
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      # ----- Install zlib for Windows -----
-      - name: Install vcpkg dependencies (Windows)
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          # Install zlib using vcpkg
-          vcpkg install zlib:x64-windows-static
-
-          # Set environment variables for the build
-          $zlibRoot = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static"
-          "ZLIB_ROOT=$zlibRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "ZLIB_INCLUDE_DIR=$zlibRoot\include" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "ZLIB_LIB_DIR=$zlibRoot\lib" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-          # Also set CMAKE paths
-          "CMAKE_PREFIX_PATH=$zlibRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
-
       # Build wheels
       - name: Build wheels (maturin)
         uses: PyO3/maturin-action@v1
+        # Remove PYO3_NO_PYTHON on Windows since it causes linking issues
         env:
-          # Prevent pyo3 from probing a wrong interpreter (e.g. 3.9) for abi3
-          PYO3_NO_PYTHON: "1"
+          PYO3_NO_PYTHON: ${{ runner.os != 'Windows' && '1' || '' }}
         with:
           command: build
           args: >-
