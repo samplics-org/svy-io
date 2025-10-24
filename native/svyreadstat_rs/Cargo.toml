@@ -1,3 +1,4 @@
+# native/svyreadstat_rs/Cargo.toml
 [package]
 name = "svyreadstat_rs"
 version = "0.1.0"
@@ -27,7 +28,7 @@ rayon = { version = "1", optional = true }
 parallel = ["rayon"]
 # Forward a vendored build flag to readstat-sys (expects readstat-sys to define it)
 vendored = ["readstat-sys/vendored"]
-default = []
+default = ["vendored"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
