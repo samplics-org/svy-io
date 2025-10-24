@@ -82,7 +82,7 @@ fn build_vendored(rs_dir: &Path) {
         eprintln!("WARNING: .zsav (compressed SPSS) files will NOT be supported on Windows");
     }
 
-    // iconv availability + stub header for Windows
+    // iconv availability + stub implementations for Windows
     if cfg!(target_os = "windows") {
         build.define("HAVE_ICONV", Some("0"));
 
@@ -101,16 +101,17 @@ typedef void* iconv_t;
         )
         .expect("write iconv.h stub");
 
-        // Create stub iconv implementations
-        let stub_c = out_dir.join("iconv_stub.c");
+        // Create comprehensive stub implementations for Windows
+        let stub_c = out_dir.join("posix_stubs.c");
         fs::write(
             &stub_c,
             r#"
 #include <stddef.h>
+#include <errno.h>
 
 typedef void* iconv_t;
 
-// Stub implementations for Windows
+// iconv stubs (character encoding conversion)
 iconv_t iconv_open(const char* tocode, const char* fromcode) {
     (void)tocode;
     (void)fromcode;
@@ -129,15 +130,26 @@ size_t iconv(iconv_t cd, const char** inbuf, size_t* inbytesleft,
     (void)inbytesleft;
     (void)outbuf;
     (void)outbytesleft;
+    errno = EINVAL;
     return (size_t)-1;  // Return error
+}
+
+// Forward declaration of the Windows I/O structure
+typedef struct readstat_io_s readstat_io_t;
+
+// Windows I/O initialization stub
+// This should be defined in readstat_io_win.c, but we provide a fallback
+readstat_io_t* unistd_io_init(void) {
+    return NULL;  // Return NULL to indicate no I/O support
 }
 "#,
         )
-        .expect("write iconv_stub.c");
+        .expect("write posix_stubs.c");
 
         // Add stub to build
         build.file(&stub_c);
         println!("cargo:rerun-if-changed={}", stub_c.display());
+        eprintln!("Created POSIX stubs for Windows");
     } else {
         build.define("HAVE_ICONV", Some("1"));
         #[cfg(target_os = "macos")]
@@ -180,15 +192,21 @@ size_t iconv(iconv_t cd, const char** inbuf, size_t* inbytesleft,
 
         let name = rel.file_name().and_then(|s| s.to_str()).unwrap_or("");
 
-        // Platform IO backend
+        // Platform IO backend - IMPORTANT: Include readstat_io_win.c on Windows!
         if cfg!(target_os = "windows") {
             if name == "readstat_io_unistd.c" {
                 skipped_files.push(format!("{} (Unix I/O)", name));
                 continue;
             }
-        } else if name == "readstat_io_win.c" {
-            skipped_files.push(format!("{} (Windows I/O)", name));
-            continue;
+            // Make sure we include readstat_io_win.c
+            if name == "readstat_io_win.c" {
+                eprintln!("Including Windows I/O: {}", p.display());
+            }
+        } else {
+            if name == "readstat_io_win.c" {
+                skipped_files.push(format!("{} (Windows I/O)", name));
+                continue;
+            }
         }
 
         // CRITICAL: Skip zlib-dependent files when zlib is not available
