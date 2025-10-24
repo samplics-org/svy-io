@@ -1,0 +1,39 @@
+# native/svyreadstat_rs/Cargo.toml
+[package]
+name = "svyreadstat_rs"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/samplics-org/svy-io"
+homepage = "https://svylab.com"
+description = "ReadStat-based readers for Python/Polars"
+
+[lib]
+name = "svyreadstat_rs"
+crate-type = ["cdylib"]  # Only cdylib for Python extension
+
+[dependencies]
+anyhow = "1"
+pyo3 = { version = "0.22", features = ["extension-module"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+arrow = "53"
+readstat-sys = { path = "../readstat-sys" }
+rayon = { version = "1", optional = true }
+
+[features]
+parallel = ["rayon"]
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+# Use pyo3 with auto-initialize for tests/benchmarks
+pyo3 = { version = "0.22", features = ["auto-initialize","extension-module", "abi3-py311"] }
+
+[[bench]]
+name = "parse_benchmarks"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
