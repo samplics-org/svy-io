@@ -68,9 +68,8 @@ fn build_vendored(rs_dir: &Path) {
     build.define("HAVE_STRING_H", Some("1"));
     build.define("HAVE_STRINGS_H", Some("1"));
 
-    // zlib: off on Windows unless explicitly provided
+    // zlib: off on Windows (we also skip zsav sources below)
     let has_zlib = !cfg!(target_os = "windows");
-
     if has_zlib {
         build.define("READSTAT_HAVE_ZLIB", Some("1"));
         build.define("HAVE_ZLIB", Some("1"));
@@ -88,18 +87,57 @@ fn build_vendored(rs_dir: &Path) {
         build.define("HAVE_ICONV", Some("0"));
 
         // Write a minimal iconv.h so readstat_iconv.h can #include it
-        let stub = out_dir.join("iconv.h");
+        let stub_h = out_dir.join("iconv.h");
         fs::write(
-            &stub,
+            &stub_h,
             r#"
 #ifndef ICONV_STUB_H
 #define ICONV_STUB_H
 #include <stddef.h>
-typedef int iconv_t; /* enough to satisfy type references; functions not provided */
+typedef void* iconv_t;
+#define ICONV_CONST const
 #endif
 "#,
         )
-        .expect("write iconv stub");
+        .expect("write iconv.h stub");
+
+        // Create stub iconv implementations
+        let stub_c = out_dir.join("iconv_stub.c");
+        fs::write(
+            &stub_c,
+            r#"
+#include <stddef.h>
+
+typedef void* iconv_t;
+
+// Stub implementations for Windows
+iconv_t iconv_open(const char* tocode, const char* fromcode) {
+    (void)tocode;
+    (void)fromcode;
+    return (iconv_t)-1;  // Return error
+}
+
+int iconv_close(iconv_t cd) {
+    (void)cd;
+    return 0;
+}
+
+size_t iconv(iconv_t cd, const char** inbuf, size_t* inbytesleft,
+             char** outbuf, size_t* outbytesleft) {
+    (void)cd;
+    (void)inbuf;
+    (void)inbytesleft;
+    (void)outbuf;
+    (void)outbytesleft;
+    return (size_t)-1;  // Return error
+}
+"#,
+        )
+        .expect("write iconv_stub.c");
+
+        // Add stub to build
+        build.file(&stub_c);
+        println!("cargo:rerun-if-changed={}", stub_c.display());
     } else {
         build.define("HAVE_ICONV", Some("1"));
         #[cfg(target_os = "macos")]
@@ -154,7 +192,6 @@ typedef int iconv_t; /* enough to satisfy type references; functions not provide
         }
 
         // CRITICAL: Skip zlib-dependent files when zlib is not available
-        // These files have #include <zlib.h> which will fail to compile
         if !has_zlib {
             if name == "readstat_zsav_compress.c"
                 || name == "readstat_zsav_read.c"
