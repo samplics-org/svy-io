@@ -1,5 +1,5 @@
 use std::{
-    env,
+    env, fs,
     path::{Path, PathBuf},
 };
 
@@ -51,11 +51,16 @@ fn build_vendored(rs_dir: &Path) {
         src_dir.display()
     );
 
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap()); // <-- add
+
     let mut build = cc::Build::new();
+
+    // Put OUT_DIR first so our stub headers win on Windows
+    build.include(&out_dir); // <-- add
     build.include(&inc_dir);
     build.include(&rs_dir);
 
-    // Minimal config.h stand-ins so headers are self-sufficient
+    // Minimal config.h stand-ins
     build.define("HAVE_STDDEF_H", Some("1"));
     build.define("HAVE_STDINT_H", Some("1"));
     build.define("HAVE_INTTYPES_H", Some("1"));
@@ -63,7 +68,7 @@ fn build_vendored(rs_dir: &Path) {
     build.define("HAVE_STRING_H", Some("1"));
     build.define("HAVE_STRINGS_H", Some("1"));
 
-    // zlib: enable on Unix, disable on Windows unless you provide a zlib SDK
+    // zlib: off on Windows (we also skip zsav/sav_compress sources below)
     let has_zlib = !cfg!(target_os = "windows");
     if has_zlib {
         build.define("READSTAT_HAVE_ZLIB", Some("1"));
@@ -74,23 +79,37 @@ fn build_vendored(rs_dir: &Path) {
         build.define("HAVE_ZLIB", Some("0"));
     }
 
-    // iconv availability
-    if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
+    // iconv availability + stub header for Windows
+    if cfg!(target_os = "windows") {
+        build.define("HAVE_ICONV", Some("0"));
+
+        // Write a minimal iconv.h so readstat_iconv.h can #include it
+        let stub = out_dir.join("iconv.h");
+        fs::write(
+            &stub,
+            r#"
+#ifndef ICONV_STUB_H
+#define ICONV_STUB_H
+#include <stddef.h>
+typedef int iconv_t; /* enough to satisfy type references; functions not provided */
+#endif
+"#,
+        )
+        .expect("write iconv stub");
+    } else {
         build.define("HAVE_ICONV", Some("1"));
         #[cfg(target_os = "macos")]
         println!("cargo:rustc-link-lib=iconv");
-    } else if cfg!(target_os = "windows") {
-        build.define("HAVE_ICONV", Some("0"));
     }
 
-    // Make sure every TU sees the public API types before private headers
+    // Force-include readstat.h for all TUs
     if cfg!(target_env = "msvc") {
-        build.flag("/FIreadstat.h"); // MSVC
+        build.flag("/FIreadstat.h");
     } else {
-        build.flag("-include").flag("readstat.h"); // GCC/Clang
+        build.flag("-include").flag("readstat.h");
     }
 
-    // Collect ONLY library .c files; exclude bins/tests/fuzz/txt and platform-incompatible IO
+    // Collect C files (skip tests/fuzz/bin/txt and zlib files when no zlib)
     let mut files: Vec<PathBuf> = Vec::new();
     for entry in walkdir::WalkDir::new(&src_dir) {
         let entry = entry.unwrap();
@@ -121,7 +140,7 @@ fn build_vendored(rs_dir: &Path) {
             continue;
         }
 
-        // If zlib is disabled, skip files that include zlib.h unconditionally
+        // Skip zlib-using sources if zlib is off
         if !has_zlib {
             let rel_str = rel.to_string_lossy();
             if rel_str.ends_with("spss/readstat_zsav_compress.c")
@@ -144,15 +163,10 @@ fn build_vendored(rs_dir: &Path) {
     build.define("READSTAT_VERSION", Some("\"vendored\""));
     build.warnings(false).compile("readstat");
 
-    // Generate bindings
+    // Bindings + link the produced static lib
     bindgen_with_includes(&inc_dir);
-
-    // Point rustc at the produced static lib
     println!("cargo:rustc-link-lib=static=readstat");
-    println!(
-        "cargo:rustc-link-search=native={}",
-        PathBuf::from(env::var("OUT_DIR").unwrap()).display()
-    );
+    println!("cargo:rustc-link-search=native={}", out_dir.display());
 }
 
 fn link_from_prefix(prefix: &str) {
