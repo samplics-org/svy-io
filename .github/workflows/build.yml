@@ -51,10 +51,28 @@ jobs:
           # bindgen looks for libclang.dll in this dir
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      # ----- Install zlib for Windows -----
+      - name: Install vcpkg dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          # Install zlib using vcpkg
+          vcpkg install zlib:x64-windows-static
+
+          # Set environment variables for the build
+          $zlibRoot = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static"
+          "ZLIB_ROOT=$zlibRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ZLIB_INCLUDE_DIR=$zlibRoot\include" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ZLIB_LIB_DIR=$zlibRoot\lib" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          # Also set CMAKE paths
+          "CMAKE_PREFIX_PATH=$zlibRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       # Build wheels
       - name: Build wheels (maturin)
         uses: PyO3/maturin-action@v1
         env:
+          # Prevent pyo3 from probing a wrong interpreter (e.g. 3.9) for abi3
           PYO3_NO_PYTHON: "1"
         with:
           command: build
@@ -64,23 +82,27 @@ jobs:
             --features vendored
           manylinux: "2_28"
           sccache: true
+          # Install clang/llvm in the manylinux container WITHOUT sudo
+          # (manylinux containers don't have sudo installed)
           before-script-linux: |
             set -eux
+            # No sudo in manylinux containers - run commands directly
             if command -v dnf >/dev/null 2>&1; then
-              dnf -y install clang llvm-devel || dnf -y install clang llvm
+              dnf install -y clang llvm-devel
             elif command -v yum >/dev/null 2>&1; then
-              yum -y install clang llvm-devel || yum -y install clang llvm
-            elif command -v microdnf >/dev/null 2>&1; then
-              microdnf install -y clang llvm-devel || microdnf install -y clang llvm
+              yum install -y clang llvm-devel
+            elif command -v apt-get >/dev/null 2>&1; then
+              apt-get update && apt-get install -y clang llvm-dev
             fi
 
-            # Find libclang; export for the same container session
-            for p in /usr/lib64 /usr/lib/llvm*/lib /usr/lib ; do
-              if ls "$p"/libclang.so* >/dev/null 2>&1; then
-                export LIBCLANG_PATH="$p"
-                break
-              fi
-            done
+            # Find and set LIBCLANG_PATH
+            if [ -f /usr/lib64/libclang.so ]; then
+              export LIBCLANG_PATH=/usr/lib64
+            elif [ -f /usr/lib/llvm/lib/libclang.so ]; then
+              export LIBCLANG_PATH=/usr/lib/llvm/lib
+            elif [ -f /usr/lib/x86_64-linux-gnu/libclang.so ]; then
+              export LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu
+            fi
             echo "Using LIBCLANG_PATH=${LIBCLANG_PATH:-unset}"
 
       - name: Show wheels
