@@ -31,7 +31,8 @@ jobs:
       - name: Install LLVM (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew update
+          # Skip brew update to avoid timeout from Python rebuild
+          # brew update
           brew install llvm
 
       - name: Export LLVM env (macOS)
@@ -53,11 +54,48 @@ jobs:
           # bindgen looks for libclang.dll in this dir
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      # Configure Python for Windows builds
+      - name: Configure Python paths (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          # Get Python installation directory
+          $pythonDir = python -c "import sys; print(sys.prefix)"
+          $pythonLibDir = "$pythonDir\libs"
+
+          Write-Host "Python directory: $pythonDir"
+          Write-Host "Python libs directory: $pythonLibDir"
+
+          # Verify python3.lib exists
+          if (Test-Path "$pythonLibDir\python311.lib") {
+            Write-Host "Found python311.lib"
+            # PyO3 looks for python3.lib, create a copy if it doesn't exist
+            if (-not (Test-Path "$pythonLibDir\python3.lib")) {
+              Copy-Item "$pythonLibDir\python311.lib" "$pythonLibDir\python3.lib"
+              Write-Host "Created python3.lib from python311.lib"
+            }
+          } else {
+            Write-Host "WARNING: python311.lib not found!"
+            Get-ChildItem $pythonLibDir
+          }
+
+          # Set environment variables for PyO3
+          "PYO3_PYTHON=$pythonDir\python.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PYTHON_SYS_EXECUTABLE=$pythonDir\python.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          # Add Python libs to linker search path
+          $currentPath = $env:LIB
+          if ($currentPath) {
+            "LIB=$pythonLibDir;$currentPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+          } else {
+            "LIB=$pythonLibDir" | Out-File -FilePath $env:GITHUB_ENV -Append
+          }
+
       # Build wheels
       - name: Build wheels (maturin)
         uses: PyO3/maturin-action@v1
-        # Remove PYO3_NO_PYTHON on Windows since it causes linking issues
         env:
+          # Only set PYO3_NO_PYTHON on Linux/macOS
           PYO3_NO_PYTHON: ${{ runner.os != 'Windows' && '1' || '' }}
         with:
           command: build
