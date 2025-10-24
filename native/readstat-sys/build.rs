@@ -1,20 +1,16 @@
 use std::{
-    env, fs,
+    env,
     path::{Path, PathBuf},
 };
 
 fn bindgen_with_includes(include_dir: &Path) {
-    println!("cargo:rerun-if-changed=wrapper.h");
-    println!("cargo:rerun-if-changed={}", include_dir.display());
-
     let builder = bindgen::Builder::default()
         .header("wrapper.h")
         .allowlist_function("readstat_.*")
         .allowlist_type("readstat_.*")
         .allowlist_var("READSTAT_.*")
         .layout_tests(false)
-        .clang_arg(format!("-I{}", include_dir.display()))
-        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
+        .clang_arg(format!("-I{}", include_dir.display()));
 
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     builder
@@ -22,6 +18,7 @@ fn bindgen_with_includes(include_dir: &Path) {
         .expect("bindgen failed for readstat")
         .write_to_file(out.join("bindings.rs"))
         .expect("Couldn't write bindings!");
+    println!("cargo:rerun-if-changed=wrapper.h");
 }
 
 fn find_readstat_dir() -> Option<PathBuf> {
@@ -55,78 +52,54 @@ fn build_vendored(rs_dir: &Path) {
     );
 
     let mut build = cc::Build::new();
-
-    // Put OUT_DIR includes first so any stubs override project headers if needed
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    build.include(&out_dir);
     build.include(&inc_dir);
     build.include(&rs_dir);
 
-    // Minimal config
-    for m in [
-        "HAVE_STDDEF_H",
-        "HAVE_STDINT_H",
-        "HAVE_INTTYPES_H",
-        "HAVE_STDLIB_H",
-        "HAVE_STRING_H",
-        "HAVE_STRINGS_H",
-    ] {
-        build.define(m, Some("1"));
-    }
+    // Minimal config.h stand-ins so headers are self-sufficient
+    build.define("HAVE_STDDEF_H", Some("1"));
+    build.define("HAVE_STDINT_H", Some("1"));
+    build.define("HAVE_INTTYPES_H", Some("1"));
+    build.define("HAVE_STDLIB_H", Some("1"));
+    build.define("HAVE_STRING_H", Some("1"));
+    build.define("HAVE_STRINGS_H", Some("1"));
 
-    // zlib
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
+    // zlib: enable on Unix, disable on Windows unless you provide a zlib SDK
+    let has_zlib = !cfg!(target_os = "windows");
+    if has_zlib {
         build.define("READSTAT_HAVE_ZLIB", Some("1"));
         build.define("HAVE_ZLIB", Some("1"));
         println!("cargo:rustc-link-lib=z");
-    }
-    #[cfg(target_os = "windows")]
-    {
+    } else {
         build.define("READSTAT_HAVE_ZLIB", Some("0"));
         build.define("HAVE_ZLIB", Some("0"));
     }
 
-    // iconv
-    #[cfg(target_os = "macos")]
-    {
+    // iconv availability
+    if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
         build.define("HAVE_ICONV", Some("1"));
+        #[cfg(target_os = "macos")]
         println!("cargo:rustc-link-lib=iconv");
-    }
-    #[cfg(target_os = "linux")]
-    {
-        build.define("HAVE_ICONV", Some("1"));
-    }
-    #[cfg(target_os = "windows")]
-    {
-        // Explicitly disable iconv and provide a stub header to avoid #include <iconv.h> failures
+    } else if cfg!(target_os = "windows") {
         build.define("HAVE_ICONV", Some("0"));
-        let stub = out_dir.join("iconv.h");
-        // minimal typedef is enough because code guarded by HAVE_ICONV won't be compiled
-        fs::write(&stub, "#pragma once\ntypedef void* iconv_t;\n").expect("write stub iconv.h");
     }
 
-    // Force-include readstat.h in all TUs (MSVC uses /FI)
-    let tool = build.get_compiler();
-    if tool.is_like_msvc() {
-        build.flag("/FIreadstat.h");
+    // Make sure every TU sees the public API types before private headers
+    if cfg!(target_env = "msvc") {
+        build.flag("/FIreadstat.h"); // MSVC
     } else {
-        build.flag("-include").flag("readstat.h");
+        build.flag("-include").flag("readstat.h"); // GCC/Clang
     }
 
-    // Pick only library .c files and the right IO backend
+    // Collect ONLY library .c files; exclude bins/tests/fuzz/txt and platform-incompatible IO
     let mut files: Vec<PathBuf> = Vec::new();
     for entry in walkdir::WalkDir::new(&src_dir) {
         let entry = entry.unwrap();
         let p = entry.path();
-        if !entry.file_type().is_file() {
+        if !entry.file_type().is_file() || p.extension().and_then(|s| s.to_str()) != Some("c") {
             continue;
         }
-        if p.extension().and_then(|s| s.to_str()) != Some("c") {
-            continue;
-        }
-
         let rel = p.strip_prefix(&src_dir).unwrap();
+
         let skip_dir = rel.components().any(|c| {
             matches!(
                 c.as_os_str().to_str(),
@@ -138,6 +111,8 @@ fn build_vendored(rs_dir: &Path) {
         }
 
         let name = rel.file_name().and_then(|s| s.to_str()).unwrap_or("");
+
+        // Platform IO backend
         if cfg!(target_os = "windows") {
             if name == "readstat_io_unistd.c" {
                 continue;
@@ -146,23 +121,43 @@ fn build_vendored(rs_dir: &Path) {
             continue;
         }
 
+        // If zlib is disabled, skip files that include zlib.h unconditionally
+        if !has_zlib {
+            let rel_str = rel.to_string_lossy();
+            if rel_str.ends_with("spss/readstat_zsav_compress.c")
+                || rel_str.ends_with("spss/readstat_zsav_read.c")
+                || rel_str.ends_with("spss/readstat_zsav_write.c")
+                || rel_str.ends_with("spss/readstat_sav_compress.c")
+            {
+                continue;
+            }
+        }
+
         files.push(p.to_path_buf());
     }
+
     for f in &files {
-        build.file(f);
         println!("cargo:rerun-if-changed={}", f.display());
+        build.file(f);
     }
 
     build.define("READSTAT_VERSION", Some("\"vendored\""));
     build.warnings(false).compile("readstat");
 
+    // Generate bindings
     bindgen_with_includes(&inc_dir);
+
+    // Point rustc at the produced static lib
+    println!("cargo:rustc-link-lib=static=readstat");
+    println!(
+        "cargo:rustc-link-search=native={}",
+        PathBuf::from(env::var("OUT_DIR").unwrap()).display()
+    );
 }
 
 fn link_from_prefix(prefix: &str) {
     println!("cargo:rustc-link-search=native={prefix}/lib");
     println!("cargo:rustc-link-lib=readstat");
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     println!("cargo:rustc-link-lib=z");
     #[cfg(target_os = "macos")]
     println!("cargo:rustc-link-lib=iconv");
@@ -171,16 +166,11 @@ fn link_from_prefix(prefix: &str) {
 }
 
 fn link_from_pkg_config() -> bool {
-    match pkg_config::Config::new().probe("readstat") {
-        Ok(lib) => {
-            if let Some(inc) = lib.include_paths.get(0) {
-                bindgen_with_includes(inc);
-            } else {
-                bindgen_with_includes(Path::new("."));
-            }
-            true
-        }
-        Err(_) => false,
+    if pkg_config::Config::new().probe("readstat").is_ok() {
+        bindgen_with_includes(Path::new("."));
+        true
+    } else {
+        false
     }
 }
 
@@ -190,7 +180,11 @@ fn main() {
             build_vendored(&dir);
             return;
         }
-        panic!("`vendored` enabled but could not find ReadStat sources. Set READSTAT_SRC or add a submodule at native/readstat-sys/third_party/readstat or ./ReadStat");
+        panic!(
+            "`vendored` enabled but could not find ReadStat sources. \
+             Set READSTAT_SRC, or add a submodule at \
+             native/readstat-sys/third_party/readstat or ./ReadStat"
+        );
     }
 
     if link_from_pkg_config() {

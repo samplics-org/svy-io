@@ -55,7 +55,6 @@ jobs:
       - name: Build wheels (maturin)
         uses: PyO3/maturin-action@v1
         env:
-          # Prevent pyo3 from probing a wrong interpreter (e.g. 3.9) for abi3
           PYO3_NO_PYTHON: "1"
         with:
           command: build
@@ -65,15 +64,23 @@ jobs:
             --features vendored
           manylinux: "2_28"
           sccache: true
-          # Install clang/llvm in the manylinux container and set LIBCLANG_PATH
           before-script-linux: |
             set -eux
-            (command -v dnf >/dev/null 2>&1 && sudo dnf -y install clang llvm-devel) || sudo yum -y install clang llvm-devel
-            if [ -f /usr/lib64/libclang.so ]; then
-              export LIBCLANG_PATH=/usr/lib64
-            elif [ -f /usr/lib/llvm/lib/libclang.so ]; then
-              export LIBCLANG_PATH=/usr/lib/llvm/lib
+            if command -v dnf >/dev/null 2>&1; then
+              dnf -y install clang llvm-devel || dnf -y install clang llvm
+            elif command -v yum >/dev/null 2>&1; then
+              yum -y install clang llvm-devel || yum -y install clang llvm
+            elif command -v microdnf >/dev/null 2>&1; then
+              microdnf install -y clang llvm-devel || microdnf install -y clang llvm
             fi
+
+            # Find libclang; export for the same container session
+            for p in /usr/lib64 /usr/lib/llvm*/lib /usr/lib ; do
+              if ls "$p"/libclang.so* >/dev/null 2>&1; then
+                export LIBCLANG_PATH="$p"
+                break
+              fi
+            done
             echo "Using LIBCLANG_PATH=${LIBCLANG_PATH:-unset}"
 
       - name: Show wheels
