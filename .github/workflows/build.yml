@@ -27,39 +27,54 @@ jobs:
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # libclang for bindgen (Linux inside manylinux container is handled below)
+      # ----- libclang for bindgen -----
       - name: Install LLVM (macOS)
         if: runner.os == 'macOS'
-        run: brew install llvm
+        run: |
+          brew update
+          brew install llvm
+      - name: Export LLVM env (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
+          echo "DYLD_FALLBACK_LIBRARY_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
+          echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
 
       - name: Install LLVM (Windows)
         if: runner.os == 'Windows'
         shell: powershell
         run: choco install -y llvm
+      - name: Export LLVM env (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          # bindgen looks for libclang.dll in this dir
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      # Build wheels
       - name: Build wheels (maturin)
         uses: PyO3/maturin-action@v1
         env:
-          # Avoid pyo3 trying to use the wrong interpreter for abi3
+          # Prevent pyo3 from probing a wrong interpreter (e.g. 3.9) for abi3
           PYO3_NO_PYTHON: "1"
-          # Let bindgen find libclang on macOS & Windows
-          LIBCLANG_PATH: ${{ runner.os == 'Windows' && 'C:\\Program Files\\LLVM\\bin' || '' }}
         with:
           command: build
           args: >-
             --release
             --out dist
             --features vendored
-          # Modern manylinux image
           manylinux: "2_28"
           sccache: true
           # Install clang/llvm in the manylinux container and set LIBCLANG_PATH
           before-script-linux: |
             set -eux
-            dnf -y install clang llvm-devel || yum -y install clang llvm-devel
+            (command -v dnf >/dev/null 2>&1 && sudo dnf -y install clang llvm-devel) || sudo yum -y install clang llvm-devel
             if [ -f /usr/lib64/libclang.so ]; then
               export LIBCLANG_PATH=/usr/lib64
+            elif [ -f /usr/lib/llvm/lib/libclang.so ]; then
+              export LIBCLANG_PATH=/usr/lib/llvm/lib
             fi
+            echo "Using LIBCLANG_PATH=${LIBCLANG_PATH:-unset}"
 
       - name: Show wheels
         run: ls -lh dist

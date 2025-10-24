@@ -1,14 +1,13 @@
 use std::{
-    env,
+    env, fs,
     path::{Path, PathBuf},
 };
 
 fn bindgen_with_includes(include_dir: &Path) {
-    // Tell Cargo to re-run if the wrapper or include dir changes
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed={}", include_dir.display());
 
-    let mut builder = bindgen::Builder::default()
+    let builder = bindgen::Builder::default()
         .header("wrapper.h")
         .allowlist_function("readstat_.*")
         .allowlist_type("readstat_.*")
@@ -32,13 +31,11 @@ fn find_readstat_dir() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    // vendored under this crate
     let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let vendored = crate_dir.join("third_party/readstat");
     if vendored.join("src/readstat.h").exists() {
         return Some(vendored);
     }
-    // repo root submodule (../../ReadStat)
     if let Some(root) = crate_dir.parent().and_then(|p| p.parent()) {
         let root_readstat = root.join("ReadStat");
         if root_readstat.join("src/readstat.h").exists() {
@@ -58,18 +55,26 @@ fn build_vendored(rs_dir: &Path) {
     );
 
     let mut build = cc::Build::new();
+
+    // Put OUT_DIR includes first so any stubs override project headers if needed
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    build.include(&out_dir);
     build.include(&inc_dir);
     build.include(&rs_dir);
 
-    // Minimal config.h stand-ins so headers are self-sufficient
-    build.define("HAVE_STDDEF_H", Some("1"));
-    build.define("HAVE_STDINT_H", Some("1"));
-    build.define("HAVE_INTTYPES_H", Some("1"));
-    build.define("HAVE_STDLIB_H", Some("1"));
-    build.define("HAVE_STRING_H", Some("1"));
-    build.define("HAVE_STRINGS_H", Some("1"));
+    // Minimal config
+    for m in [
+        "HAVE_STDDEF_H",
+        "HAVE_STDINT_H",
+        "HAVE_INTTYPES_H",
+        "HAVE_STDLIB_H",
+        "HAVE_STRING_H",
+        "HAVE_STRINGS_H",
+    ] {
+        build.define(m, Some("1"));
+    }
 
-    // zlib: present by default on Linux/macOS; avoid on Windows unless you add it explicitly.
+    // zlib
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         build.define("READSTAT_HAVE_ZLIB", Some("1"));
@@ -78,12 +83,11 @@ fn build_vendored(rs_dir: &Path) {
     }
     #[cfg(target_os = "windows")]
     {
-        // If you later install zlib, flip these to 1 and link it.
         build.define("READSTAT_HAVE_ZLIB", Some("0"));
         build.define("HAVE_ZLIB", Some("0"));
     }
 
-    // iconv: only define on platforms where it exists by default
+    // iconv
     #[cfg(target_os = "macos")]
     {
         build.define("HAVE_ICONV", Some("1"));
@@ -93,10 +97,16 @@ fn build_vendored(rs_dir: &Path) {
     {
         build.define("HAVE_ICONV", Some("1"));
     }
-    // NOTE: DO NOT define HAVE_ICONV on Windows. Some headers gate on #ifdef HAVE_ICONV.
+    #[cfg(target_os = "windows")]
+    {
+        // Explicitly disable iconv and provide a stub header to avoid #include <iconv.h> failures
+        build.define("HAVE_ICONV", Some("0"));
+        let stub = out_dir.join("iconv.h");
+        // minimal typedef is enough because code guarded by HAVE_ICONV won't be compiled
+        fs::write(&stub, "#pragma once\ntypedef void* iconv_t;\n").expect("write stub iconv.h");
+    }
 
-    // Force-include the public header in every TU:
-    // GCC/Clang: -include file ; MSVC: /FIfile
+    // Force-include readstat.h in all TUs (MSVC uses /FI)
     let tool = build.get_compiler();
     if tool.is_like_msvc() {
         build.flag("/FIreadstat.h");
@@ -104,7 +114,7 @@ fn build_vendored(rs_dir: &Path) {
         build.flag("-include").flag("readstat.h");
     }
 
-    // Collect ONLY library .c files; exclude bin/, fuzz/, test(s)/, txt/
+    // Pick only library .c files and the right IO backend
     let mut files: Vec<PathBuf> = Vec::new();
     for entry in walkdir::WalkDir::new(&src_dir) {
         let entry = entry.unwrap();
@@ -117,7 +127,6 @@ fn build_vendored(rs_dir: &Path) {
         }
 
         let rel = p.strip_prefix(&src_dir).unwrap();
-
         let skip_dir = rel.components().any(|c| {
             matches!(
                 c.as_os_str().to_str(),
@@ -128,7 +137,6 @@ fn build_vendored(rs_dir: &Path) {
             continue;
         }
 
-        // platform IO backend
         let name = rel.file_name().and_then(|s| s.to_str()).unwrap_or("");
         if cfg!(target_os = "windows") {
             if name == "readstat_io_unistd.c" {
@@ -140,7 +148,6 @@ fn build_vendored(rs_dir: &Path) {
 
         files.push(p.to_path_buf());
     }
-
     for f in &files {
         build.file(f);
         println!("cargo:rerun-if-changed={}", f.display());
@@ -149,22 +156,16 @@ fn build_vendored(rs_dir: &Path) {
     build.define("READSTAT_VERSION", Some("\"vendored\""));
     build.warnings(false).compile("readstat");
 
-    // Generate bindings using the vendored include dir
     bindgen_with_includes(&inc_dir);
 }
 
 fn link_from_prefix(prefix: &str) {
     println!("cargo:rustc-link-search=native={prefix}/lib");
     println!("cargo:rustc-link-lib=readstat");
-    // zlib/iconv typical on Unix prefixes
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
-        println!("cargo:rustc-link-lib=z");
-    }
+    println!("cargo:rustc-link-lib=z");
     #[cfg(target_os = "macos")]
-    {
-        println!("cargo:rustc-link-lib=iconv");
-    }
+    println!("cargo:rustc-link-lib=iconv");
     println!("cargo:include={prefix}/include");
     bindgen_with_includes(&PathBuf::from(format!("{prefix}/include")));
 }
@@ -172,11 +173,9 @@ fn link_from_prefix(prefix: &str) {
 fn link_from_pkg_config() -> bool {
     match pkg_config::Config::new().probe("readstat") {
         Ok(lib) => {
-            // Use the first include path reported by pkg-config for bindgen
             if let Some(inc) = lib.include_paths.get(0) {
                 bindgen_with_includes(inc);
             } else {
-                // Fallback (shouldn't happen)
                 bindgen_with_includes(Path::new("."));
             }
             true
@@ -186,20 +185,14 @@ fn link_from_pkg_config() -> bool {
 }
 
 fn main() {
-    // Vendored build if feature is enabled
     if cfg!(feature = "vendored") {
         if let Some(dir) = find_readstat_dir() {
             build_vendored(&dir);
             return;
         }
-        panic!(
-            "`vendored` enabled but could not find ReadStat sources. \
-             Set READSTAT_SRC, or add a submodule at \
-             native/readstat-sys/third_party/readstat or ./ReadStat"
-        );
+        panic!("`vendored` enabled but could not find ReadStat sources. Set READSTAT_SRC or add a submodule at native/readstat-sys/third_party/readstat or ./ReadStat");
     }
 
-    // System builds
     if link_from_pkg_config() {
         return;
     }
