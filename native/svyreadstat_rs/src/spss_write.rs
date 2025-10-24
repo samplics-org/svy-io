@@ -488,7 +488,7 @@ fn write_spss_minimal(
         let rc = readstat_begin_writing_sav(
             writer,
             &mut outfile as *mut File as *mut c_void,
-            total_rows,
+            total_rows.try_into().expect("row count overflow"),
         );
         if rc != 0 {
             readstat_writer_free(writer);

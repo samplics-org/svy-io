@@ -228,7 +228,7 @@ fn write_xpt_impl(
         let rc = readstat_begin_writing_xport(
             writer,
             &mut outfile as *mut File as *mut c_void,
-            n_rows as i64,
+            n_rows.try_into().expect("row count overflow"),
         );
         if rc != 0 {
             readstat_writer_free(writer);
