@@ -5,7 +5,7 @@ version = "0.0.1a"
 description = "SAS/SPSS/Stata I/O with Polars, powered by ReadStat + PyO3"
 homepage = "https://svylab.com/docs/svy-io"
 readme = "README.md"
-license = { file = "LICENSE" }
+license = { file = "LICENSE.md" }
 authors = [{ name = "Samplics LLC" }]
 classifiers = [
   "License :: OSI Approved :: MIT License",

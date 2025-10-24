@@ -11,28 +11,38 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Build separate mac wheels instead of --universal2
+        # Separate mac builds instead of --universal2
         os: [ubuntu-22.04, macos-13, macos-latest, windows-latest]
 
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive # <-- pull ReadStat sources
+          submodules: recursive
+
+      # Make sure we have a new-enough Python to satisfy abi3-py311 on Windows
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # libclang for bindgen (Windows)
+      # libclang for bindgen (Linux inside manylinux container is handled below)
+      - name: Install LLVM (macOS)
+        if: runner.os == 'macOS'
+        run: brew install llvm
+
       - name: Install LLVM (Windows)
         if: runner.os == 'Windows'
         shell: powershell
         run: choco install -y llvm
 
-      # Build wheels (pass vendored!)
       - name: Build wheels (maturin)
         uses: PyO3/maturin-action@v1
         env:
-          # Windows: tell bindgen where libclang.dll lives
+          # Avoid pyo3 trying to use the wrong interpreter for abi3
+          PYO3_NO_PYTHON: "1"
+          # Let bindgen find libclang on macOS & Windows
           LIBCLANG_PATH: ${{ runner.os == 'Windows' && 'C:\\Program Files\\LLVM\\bin' || '' }}
         with:
           command: build
@@ -40,16 +50,15 @@ jobs:
             --release
             --out dist
             --features vendored
-          # Use a modern manylinux image; we’ll install clang inside it
+          # Modern manylinux image
           manylinux: "2_28"
           sccache: true
+          # Install clang/llvm in the manylinux container and set LIBCLANG_PATH
           before-script-linux: |
             set -eux
-            # Install clang/llvm so bindgen can find libclang.so
-            (dnf -y install clang llvm-devel || yum -y install clang llvm-devel)
-            # Best-effort export; maturin runs in same shell, so this persists
-            if command -v ldconfig >/dev/null; then
-              export LIBCLANG_PATH="$(dirname "$(ldconfig -p | grep -m1 libclang.so | awk '{print $4}')")"
+            dnf -y install clang llvm-devel || yum -y install clang llvm-devel
+            if [ -f /usr/lib64/libclang.so ]; then
+              export LIBCLANG_PATH=/usr/lib64
             fi
 
       - name: Show wheels
@@ -62,7 +71,7 @@ jobs:
           python -m pip install dist/*.whl
           python - <<'PY'
           import svy_io, svy_io.svyreadstat_rs as _m
-          print("OK:", svy_io.__name__, getattr(svy_io, "__version__", "n/a"))
+          print("OK:", svy_io.__name__, getattr(svy_io, "__version__", "n/a"), _m.__name__)
           PY
 
       - name: Upload wheels
@@ -77,7 +86,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive # <-- include ReadStat in sdist
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - name: Build sdist
         uses: PyO3/maturin-action@v1
@@ -98,7 +107,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-22.04
     permissions:
-      id-token: write # OIDC Trusted Publishing
+      id-token: write
       contents: read
     steps:
       - uses: actions/download-artifact@v4
