@@ -10,16 +10,6 @@ from svy_io import write_xpt
 def test_write_xpt_basic(tmp_path):
     """Test basic XPT writing"""
 
-    # In your test, wrap with try/except to see errors
-    try:
-        write_xpt(df, "/tmp/test.xpt")
-        print("Success!")
-    except Exception as e:
-        print(f"ERROR: {e}")
-        import traceback
-
-        traceback.print_exc()
-
     df = pl.DataFrame(
         {"id": [1, 2, 3], "name": ["Alice", "Bob", "Charlie"], "score": [95.5, 87.3, 91.2]}
     )

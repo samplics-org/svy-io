@@ -513,34 +513,6 @@ def test_spss_integer_labelleds_are_round_tripped():
             os.unlink(tmp_path)
 
 
-def test_debug_missing_write():
-    """Debug test to see if missing values are being written"""
-    df = pl.DataFrame({"x": [1.0, 9.0]})
-    user_missing = [{"col": "x", "values": [9.0]}]
-
-    with tempfile.NamedTemporaryFile(suffix=".sav", delete=False) as tmp:
-        tmp_path = tmp.name
-
-    try:
-        write_sav(df, tmp_path, user_missing=user_missing)
-
-        # Read back
-        df2, meta2 = read_sav(tmp_path, user_na=True)
-
-        import json
-
-        print("\n\nDEBUG METADATA:")
-        print(json.dumps(meta2, indent=2, default=str))
-
-        # Check if user_missing is in the vars
-        for var in meta2["vars"]:
-            print(f"\nVariable {var['name']}: has user_missing = {var.get('user_missing')}")
-
-    finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-
-
 def test_na_range_roundtrips_successfully_with_mismatched_type():
     """na_range should work with different numeric types"""
     # Based on Haven's test
@@ -570,16 +542,9 @@ def test_na_range_roundtrips_successfully_with_mismatched_type():
         write_sav(df, tmp_path, user_missing=user_missing)
         df2, meta2 = read_sav(tmp_path, user_na=True)
 
-        # DEBUG: Print the metadata
-        import json
-
-        print("\n\nMETADATA:")
-        print(json.dumps(meta2, indent=2, default=str))
-
         # Check that ranges were preserved for all columns
         for col in ["x_int_int", "x_int_real", "x_real_real", "x_real_int"]:
             var = next(v for v in meta2["vars"] if v["name"] == col)
-            print(f"\n{col}: {var}")
             assert var.get("user_missing") is not None
             assert var["user_missing"]["range"] is not None
             assert var["user_missing"]["range"][0] == 1.0

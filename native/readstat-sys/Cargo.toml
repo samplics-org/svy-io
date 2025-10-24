@@ -5,13 +5,18 @@ edition = "2021"
 links = "readstat"
 license = "MIT"
 repository = "https://github.com/samplics-org/svy-io"
-homepage = "https://svylab.com"
-description = "ReadStat-based readers for Python/Polars"
+homepage = "https://svylab.com/docs/svy-io"
+description = "ReadStat FFI (vendored or system)"
 
 [build-dependencies]
 bindgen = "0.70"
 pkg-config = "0.3"
 cc = "1"
+walkdir = "2"          # <- to glob C sources in vendored mode
 
 [dependencies]
 libc = "0.2"
+
+[features]
+# Default to vendored in CI; you can leave it off locally if you prefer system libs
+vendored = []
