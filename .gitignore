@@ -128,11 +128,13 @@ notebooks/*
 presentations/*/
 *.ipynb_checkpoints/
 roadmap/
-roadmap.md
 specs/
 benchmarks/
 svy-old
 scripts/
+roadmap.md
+build.md
+CONTRIBUTING.md
 
 # cargo, uv, ruff and others
 *.lock

@@ -10,7 +10,7 @@ Lightweight, Pythonic file I/O for **SAS**, **SPSS**, and **Stata** powered by t
 pip install svy-io
 ```
 
-**Requires:** Python and [Polars](https://pola-rs.github.io/polars/) (installed automatically as a dependency).
+**Requires:** Python, [Polars](https://pola-rs.github.io/polars/), and [pyarrow](https://arrow.apache.org/docs/python/) (installed automatically as a dependency).
 
 ---
 
