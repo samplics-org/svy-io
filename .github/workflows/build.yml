@@ -128,8 +128,14 @@ jobs:
             fi
             echo "Using LIBCLANG_PATH=${LIBCLANG_PATH:-unset}"
 
-      - name: Show wheels
+      - name: Show wheels (Unix)
+        if: runner.os != 'Windows'
         run: ls -lh dist
+
+      - name: Show wheels (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: Get-ChildItem dist
 
       - name: Verify import
         shell: bash
