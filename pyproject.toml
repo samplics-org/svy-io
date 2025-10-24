@@ -1,7 +1,7 @@
 # ./pyproject.toml
 [project]
 name = "svy-io"
-version = "0.0.1a"
+version = "0.0.2a"
 description = "SAS/SPSS/Stata I/O with Polars, powered by ReadStat + PyO3"
 homepage = "https://svylab.com/docs/svy-io"
 readme = "README.md"
