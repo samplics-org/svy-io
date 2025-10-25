@@ -13,7 +13,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # We build Linux for BOTH x86_64 and aarch64 so arm64 Docker can use the wheel
         include:
           # --- Linux x86_64 ---
           - os: ubuntu-22.04
@@ -37,7 +36,7 @@ jobs:
             python-version: "3.13"
             target: aarch64-unknown-linux-gnu
 
-          # --- macOS (Apple Silicon runner). If you still need Intel mac wheels, add macos-13 too. ---
+          # --- macOS (Apple Silicon) ---
           - os: macos-latest
             python-version: "3.11"
           - os: macos-latest
@@ -52,7 +51,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive # Ensures the ReadStat C source is downloaded
+          submodules: recursive
 
       - uses: actions/setup-python@v5
         with:
@@ -61,18 +60,17 @@ jobs:
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # --- QEMU only needed when running manylinux aarch64 container on x86_64 runner ---
+      # QEMU only needed when running the manylinux aarch64 container on x86_64 host
       - name: Set up QEMU (for aarch64 wheels)
         if: runner.os == 'Linux' && matrix.target == 'aarch64-unknown-linux-gnu'
         uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
 
-      # ----- libclang for bindgen (needed to parse C headers) -----
+      # ----- libclang for bindgen -----
       - name: Install LLVM (macOS)
         if: runner.os == 'macOS'
-        run: |
-          brew install llvm
+        run: brew install llvm
 
       - name: Export LLVM env (macOS)
         if: runner.os == 'macOS'
@@ -86,7 +84,7 @@ jobs:
         shell: powershell
         run: choco install -y llvm
 
-      # Ensure python3.lib exists for the MSVC linker (Stable ABI requirement)
+      # Ensure python3.lib exists for the MSVC linker (abi3)
       - name: Ensure python3.lib (Windows)
         if: runner.os == 'Windows'
         shell: powershell
@@ -124,19 +122,20 @@ jobs:
             --out dist
             --features vendored
           manylinux: "2_28"
-          # Pass target for Linux builds so we produce both x86_64 and aarch64 wheels
+          # Produce both x86_64 and aarch64 wheels on Linux
           target: ${{ (runner.os == 'Linux') && matrix.target || '' }}
           sccache: true
           before-script-linux: |
             set -eux
-            # Install clang/llvm inside the manylinux container (no sudo)
+            # Install clang/llvm + zlib headers INSIDE the manylinux container (no sudo there)
             if command -v dnf >/dev/null 2>&1; then
-              dnf install -y clang llvm-devel
+              dnf install -y clang llvm-devel zlib-devel
             elif command -v yum >/dev/null 2>&1; then
-              yum install -y clang llvm-devel
+              yum install -y clang llvm-devel zlib-devel
             elif command -v apt-get >/dev/null 2>&1; then
-              apt-get update && apt-get install -y clang llvm-dev
+              apt-get update && apt-get install -y clang llvm-dev zlib1g-dev
             fi
+
             # LIBCLANG_PATH autodetect
             if [ -f /usr/lib64/libclang.so ]; then
               export LIBCLANG_PATH=/usr/lib64
@@ -192,7 +191,6 @@ jobs:
           print("OK:", svy_io.__name__, getattr(svy_io, "__version__", "n/a"), _m.__name__)
           PY
 
-      # Include target in artifact name to avoid collisions when we build both arches
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
