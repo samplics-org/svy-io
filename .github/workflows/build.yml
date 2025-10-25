@@ -13,8 +13,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Separate mac builds instead of --universal2
-        os: [ubuntu-22.04, macos-13, macos-latest, windows-latest]
+        # Building for latest stable macOS runner (which handles both architectures)
+        os: [ubuntu-22.04, macos-latest, windows-latest]
         python-version: ["3.11", "3.12", "3.13"]
 
     steps:
@@ -30,13 +30,11 @@ jobs:
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # ----- libclang for bindgen -----
-      # macOS LLVM installation is complex but necessary for bindgen
+      # ----- libclang for bindgen (needed to parse C headers) -----
+
       - name: Install LLVM (macOS)
         if: runner.os == 'macOS'
         run: |
-          # Skip brew update to avoid timeout from Python rebuild
-          # brew update
           brew install llvm
 
       - name: Export LLVM env (macOS)
@@ -46,23 +44,45 @@ jobs:
           echo "DYLD_FALLBACK_LIBRARY_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
           echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
 
-      # SIMPLIFICATION: Install LLVM on Windows without manual path manipulation
       - name: Install LLVM (Windows)
         if: runner.os == 'Windows'
         shell: powershell
         run: choco install -y llvm
 
+      # FIX: Ensure python3.lib exists for the MSVC linker (Stable ABI requirement)
+      - name: Ensure python3.lib (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $libDir = Join-Path $env:pythonLocation "libs"
+          Write-Host "Python libs: $libDir"
+          # PyO3 stable ABI often looks for python3.lib directly.
+          $candidates = @("python311.lib","python312.lib","python313.lib")
+          $target = Join-Path $libDir "python3.lib"
+
+          if (-not (Test-Path $target)) {
+            foreach ($c in $candidates) {
+              $src = Join-Path $libDir $c
+              if (Test-Path $src) { Copy-Item $src $target; break }
+            }
+          }
+          if (-not (Test-Path $target)) { Write-Error "python3.lib not found or created." }
+
+      - name: Clean dist directory
+        shell: bash
+        # Ensure the directory is clean to prevent artifact corruption/concatenation issues
+        run: rm -rf dist && mkdir -p dist
+
       # Build wheels
       - name: Build wheels (maturin)
         uses: PyO3/maturin-action@v1
         env:
-          # Only set PYO3_NO_PYTHON on Linux/macOS
+          # PYO3_NO_PYTHON speeds up *nix builds when using abi3
           PYO3_NO_PYTHON: ${{ runner.os != 'Windows' && '1' || '' }}
-          # Fix LNK1181 error on Windows by explicitly setting the LIB path
-          # to the Python import libraries folder.
+          # Fix LNK1181 error on Windows by setting the linker search path
           LIB: ${{ runner.os == 'Windows' && format('{0}\libs', env.pythonLocation) || '' }}
-          # Set LIBCLANG_PATH for Windows
-          # NOTE: Using a simple path here assumes choco installation is consistent.
+          # Set LIBCLANG_PATH for Windows (relying on global env from choco path)
+          # NOTE: The manual choco install and global export is generally the most stable setup.
           LIBCLANG_PATH: ${{ runner.os == 'Windows' && 'C:\Program Files\LLVM\bin' || env.LIBCLANG_PATH }}
         with:
           command: build
@@ -75,7 +95,6 @@ jobs:
           # Install clang/llvm in the manylinux container WITHOUT sudo
           before-script-linux: |
             set -eux
-            # No sudo in manylinux containers - run commands directly
             if command -v dnf >/dev/null 2>&1; then
               dnf install -y clang llvm-devel
             elif command -v yum >/dev/null 2>&1; then
@@ -102,6 +121,30 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: Get-ChildItem dist
+
+      # NEW FIX: Validate the integrity of the generated wheel file immediately
+      - name: Validate wheels (Integrity Check)
+        shell: bash
+        run: |
+          python - <<'PY'
+          import glob, zipfile, sys
+          bad = False
+          for whl in glob.glob("dist/*.whl"):
+              ok = zipfile.is_zipfile(whl)
+              print(f"{whl}: is_zipfile={ok}")
+              if not ok:
+                  bad = True
+                  continue
+              try:
+                  with zipfile.ZipFile(whl) as zf:
+                      err = zf.testzip()
+                      print("  testzip:", err)
+                      if err: bad = True
+              except Exception as e:
+                  print(f"  Error testing zip: {e}")
+                  bad = True
+          sys.exit(1 if bad else 0)
+          PY
 
       - name: Verify import
         shell: bash
@@ -159,6 +202,20 @@ jobs:
         with:
           name: sdist
           path: dist
+
+      # Final check before upload, if this fails, we don't upload corrupted file
+      - name: Validate wheels (publish)
+        shell: bash
+        run: |
+          python - <<'PY'
+          import glob, zipfile, sys
+          bad = False
+          for whl in glob.glob("dist/*.whl"):
+              ok = zipfile.is_zipfile(whl)
+              if not ok: bad = True
+          sys.exit(1 if bad else 0)
+          PY
+
       - name: Upload (PyPI)
         uses: PyO3/maturin-action@v1
         with:
