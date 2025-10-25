@@ -22,21 +22,33 @@ fn bindgen_with_includes(include_dir: &Path) {
 }
 
 fn find_readstat_dir() -> Option<PathBuf> {
+    use std::env;
+    use std::path::PathBuf;
+
+    // Explicit override wins
     if let Some(p) = env::var_os("READSTAT_SRC") {
         let p = PathBuf::from(p);
         if p.join("src/readstat.h").exists() {
             return Some(p);
         }
     }
-    let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let vendored = crate_dir.join("third_party/readstat");
-    if vendored.join("src/readstat.h").exists() {
-        return Some(vendored);
-    }
-    if let Some(root) = crate_dir.parent().and_then(|p| p.parent()) {
-        let root_readstat = root.join("ReadStat");
-        if root_readstat.join("src/readstat.h").exists() {
-            return Some(root_readstat);
+
+    // Start at the crate dir and walk up ~5 levels to handle both
+    // repo checkout and maturin sdist ("src/..." wrapper) layouts.
+    let mut cur = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    for _ in 0..5 {
+        // Prefer a third_party vendored path if present at this level
+        let third_party = cur.join("native/readstat-sys/third_party/readstat");
+        if third_party.join("src/readstat.h").exists() {
+            return Some(third_party);
+        }
+        // Otherwise, look for a top-level ReadStat/ tree
+        let readstat_top = cur.join("ReadStat");
+        if readstat_top.join("src/readstat.h").exists() {
+            return Some(readstat_top);
+        }
+        if !cur.pop() {
+            break;
         }
     }
     None
