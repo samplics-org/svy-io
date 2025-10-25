@@ -31,6 +31,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       # ----- libclang for bindgen -----
+      # macOS LLVM installation is complex but necessary for bindgen
       - name: Install LLVM (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -45,53 +46,17 @@ jobs:
           echo "DYLD_FALLBACK_LIBRARY_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
           echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
 
+      # SIMPLIFICATION: Install LLVM on Windows without manual path manipulation
       - name: Install LLVM (Windows)
         if: runner.os == 'Windows'
         shell: powershell
         run: choco install -y llvm
 
-      - name: Export LLVM env (Windows)
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          # bindgen looks for libclang.dll in this dir
-          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
+      # REMOVED: Export LLVM env (Windows)
+      # Relying on choco install to set up paths or Maturin/bindgen to find LLVM
 
-      - name: Configure Python paths (Windows)
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          # Get Python installation directory
-          $pythonDir = python -c "import sys; print(sys.prefix)"
-          $pythonLibDir = "$pythonDir\libs"
-
-          Write-Host "Python directory: $pythonDir"
-          Write-Host "Python libs directory: $pythonLibDir"
-
-          # Verify python3.lib exists
-          if (Test-Path "$pythonLibDir\python311.lib") {
-            Write-Host "Found python311.lib"
-            # PyO3 looks for python3.lib, create a copy if it doesn't exist
-            if (-not (Test-Path "$pythonLibDir\python3.lib")) {
-              Copy-Item "$pythonLibDir\python311.lib" "$pythonLibDir\python3.lib"
-              Write-Host "Created python3.lib from python311.lib"
-            }
-          } else {
-            Write-Host "WARNING: python311.lib not found!"
-            Get-ChildItem $pythonLibDir
-          }
-
-          # Set environment variables for PyO3
-          "PYO3_PYTHON=$pythonDir\python.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "PYTHON_SYS_EXECUTABLE=$pythonDir\python.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-          # Add Python libs to linker search path
-          $currentPath = $env:LIB
-          if ($currentPath) {
-            "LIB=$pythonLibDir;$currentPath" | Out-File -FilePath $env:GITHUB_ENV -Append
-          } else {
-            "LIB=$pythonLibDir" | Out-File -FilePath $env:GITHUB_ENV -Append
-          }
+      # REMOVED: Configure Python paths (Windows)
+      # Maturin should automatically find the correct Python libs when actions/setup-python is used.
 
       # Build wheels
       - name: Build wheels (maturin)
@@ -99,6 +64,8 @@ jobs:
         env:
           # Only set PYO3_NO_PYTHON on Linux/macOS
           PYO3_NO_PYTHON: ${{ runner.os != 'Windows' && '1' || '' }}
+          # Use a more explicit way to set LIBCLANG_PATH for Windows if needed
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin # Re-adds the path directly to the action environment
         with:
           command: build
           args: >-
