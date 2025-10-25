@@ -14,7 +14,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # --- Linux x86_64 ---
           - os: ubuntu-22.04
             python-version: "3.11"
             target: x86_64-unknown-linux-gnu
@@ -25,7 +24,6 @@ jobs:
             python-version: "3.13"
             target: x86_64-unknown-linux-gnu
 
-          # --- Linux aarch64 (cross) ---
           - os: ubuntu-22.04
             python-version: "3.11"
             target: aarch64-unknown-linux-gnu
@@ -36,7 +34,6 @@ jobs:
             python-version: "3.13"
             target: aarch64-unknown-linux-gnu
 
-          # --- macOS (Apple Silicon) ---
           - os: macos-latest
             python-version: "3.11"
           - os: macos-latest
@@ -44,7 +41,6 @@ jobs:
           - os: macos-latest
             python-version: "3.13"
 
-          # --- Windows (abi3 only needs one Python) ---
           - os: windows-latest
             python-version: "3.11"
 
@@ -60,7 +56,6 @@ jobs:
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # QEMU only needed when running the manylinux aarch64 container on x86_64 host
       - name: Set up QEMU (for aarch64 wheels)
         if: runner.os == 'Linux' && matrix.target == 'aarch64-unknown-linux-gnu'
         uses: docker/setup-qemu-action@v3
@@ -84,13 +79,11 @@ jobs:
         shell: powershell
         run: choco install -y llvm
 
-      # Ensure python3.lib exists for the MSVC linker (abi3)
       - name: Ensure python3.lib (Windows)
         if: runner.os == 'Windows'
         shell: powershell
         run: |
           $libDir = Join-Path $env:pythonLocation "libs"
-          Write-Host "Python libs: $libDir"
           $candidates = @("python311.lib","python312.lib","python313.lib")
           $target = Join-Path $libDir "python3.lib"
           if (-not (Test-Path $target)) {
@@ -105,21 +98,14 @@ jobs:
         shell: bash
         run: rm -rf dist && mkdir -p dist
 
-      # Build wheels
       - name: Build wheels (maturin)
         uses: PyO3/maturin-action@v1
         env:
-          # Faster abi3 builds on *nix
           PYO3_NO_PYTHON: ${{ runner.os != 'Windows' && '1' || '' }}
-          # MSVC linker search path for Python import libs
           LIB: ${{ runner.os == 'Windows' && format('{0}\libs', env.pythonLocation) || '' }}
-          # Set LIBCLANG_PATH for Windows
           LIBCLANG_PATH: ${{ runner.os == 'Windows' && 'C:\Program Files\LLVM\bin' || env.LIBCLANG_PATH }}
-          # Our build.rs diagnostics
           READSTAT_BUILD_DEBUG: "1"
-          # Allow pkg-config to work in cross mode
           PKG_CONFIG_ALLOW_CROSS: "1"
-          # Surface the matrix target to the before-script
           MATURIN_TARGET: ${{ matrix.target }}
         with:
           command: build
@@ -128,47 +114,33 @@ jobs:
             --out dist
             --features vendored
           manylinux: "2_28"
-          # Produce both x86_64 and aarch64 wheels on Linux
           target: ${{ (runner.os == 'Linux') && matrix.target || '' }}
-          # sccache is flaky on macOS (ServerBusy) → disable there only
           sccache: ${{ runner.os != 'macOS' }}
           before-script-linux: |
             set -eux
 
-            # Defensive: do not leak host include paths into cross builds
+            # Avoid leaking host headers into cross builds
             unset CPATH || true
             unset C_INCLUDE_PATH || true
             unset CPLUS_INCLUDE_PATH || true
             unset OBJC_INCLUDE_PATH || true
 
-            if [ "${MATURIN_TARGET:-}" = "aarch64-unknown-linux-gnu" ]; then
-              # aarch64 cross sysroot in the manylinux_2_28-cross image
-              SYSROOT="/usr/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot"
-
-              # Install target headers into the TARGET sysroot (not host!)
-              dnf install -y \
-                --installroot="$SYSROOT" \
-                --releasever=9 \
-                --forcearch=aarch64 \
-                --setopt=install_weak_deps=False \
-                --setopt=tsflags=nodocs \
-                zlib-devel glibc-headers glibc-devel
-
-              # Point pkg-config at the TARGET sysroot so zlib resolves correctly
-              export PKG_CONFIG_SYSROOT_DIR="$SYSROOT"
-              export PKG_CONFIG_DIR=
-              export PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib64/pkgconfig:$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig"
-
-              # Sanity check: must print target paths and succeed
-              pkg-config --print-errors --cflags --libs zlib
-
+            # Install clang/llvm inside the container (no sudo there)
+            PM=""
+            for x in microdnf dnf yum; do
+              if command -v "$x" >/dev/null 2>&1; then PM="$x"; break; fi
+            done
+            if [ -n "$PM" ]; then
+              if [ "$PM" = "microdnf" ]; then
+                microdnf install -y clang llvm-devel || true
+              else
+                $PM install -y clang llvm-devel || true
+              fi
             else
-              # Native x86_64 build inside manylinux: install host headers
-              dnf install -y zlib-devel clang llvm-devel
-              pkg-config --print-errors --cflags --libs zlib
+              echo "No RPM package manager (microdnf/dnf/yum) found; assuming clang/llvm present"
             fi
 
-            # Best effort LIBCLANG_PATH autodetect (not critical when bindgen uses system clang)
+            # Point bindgen at libclang if we can find it
             if [ -f /usr/lib64/libclang.so ]; then
               export LIBCLANG_PATH=/usr/lib64
             elif [ -f /usr/lib/llvm/lib/libclang.so ]; then
@@ -189,7 +161,6 @@ jobs:
         shell: powershell
         run: Get-ChildItem dist
 
-      # Validate wheel integrity
       - name: Validate wheels (Integrity Check)
         shell: bash
         run: |
@@ -197,19 +168,19 @@ jobs:
           import glob, zipfile, sys
           bad = False
           for whl in glob.glob("dist/*.whl"):
-              ok = zipfile.is_zipfile(whl)
-              print(f"{whl}: is_zipfile={ok}")
-              if not ok:
-                  bad = True
-                  continue
-              try:
-                  with zipfile.ZipFile(whl) as zf:
-                      err = zf.testzip()
-                      print("  testzip:", err)
-                      if err: bad = True
-              except Exception as e:
-                  print(f"  Error testing zip: {e}")
-                  bad = True
+            ok = zipfile.is_zipfile(whl)
+            print(f"{whl}: is_zipfile={ok}")
+            if not ok:
+              bad = True
+              continue
+            try:
+              with zipfile.ZipFile(whl) as zf:
+                err = zf.testzip()
+                print("  testzip:", err)
+                if err: bad = True
+            except Exception as e:
+              print(f"  Error testing zip: {e}")
+              bad = True
           sys.exit(1 if bad else 0)
           PY
 
@@ -268,7 +239,6 @@ jobs:
         with:
           name: sdist
           path: dist
-
       - name: Validate wheels (publish)
         shell: bash
         run: |
@@ -276,12 +246,11 @@ jobs:
           import glob, zipfile, sys
           bad = False
           for whl in glob.glob("dist/*.whl"):
-              if not zipfile.is_zipfile(whl):
-                  print("Bad wheel:", whl)
-                  bad = True
+            if not zipfile.is_zipfile(whl):
+              print("Bad wheel:", whl)
+              bad = True
           sys.exit(1 if bad else 0)
           PY
-
       - name: Upload (PyPI)
         uses: PyO3/maturin-action@v1
         with:
