@@ -1,12 +1,14 @@
-name: build
+name: Build and Publish Wheels
 on:
   push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*" # Only run release on version tags
   pull_request:
   workflow_dispatch:
 
 jobs:
   build-wheels:
-    name: Wheels (${{ matrix.os }})
+    name: Wheels (${{ matrix.os }} / Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -18,12 +20,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: recursive # Ensures the ReadStat C source is downloaded
 
-      # Make sure we have a new-enough Python to satisfy abi3-py311 on Windows
+      # CRITICAL FIX: Use the matrix variable here to target 3.11, 3.12, and 3.13
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -55,7 +57,6 @@ jobs:
           # bindgen looks for libclang.dll in this dir
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      # Configure Python for Windows builds
       - name: Configure Python paths (Windows)
         if: runner.os == 'Windows'
         shell: powershell
@@ -107,7 +108,6 @@ jobs:
           manylinux: "2_28"
           sccache: true
           # Install clang/llvm in the manylinux container WITHOUT sudo
-          # (manylinux containers don't have sudo installed)
           before-script-linux: |
             set -eux
             # No sudo in manylinux containers - run commands directly
@@ -148,10 +148,11 @@ jobs:
           print("OK:", svy_io.__name__, getattr(svy_io, "__version__", "n/a"), _m.__name__)
           PY
 
+      # CRITICAL FIX: Include Python version in artifact name to prevent overwriting
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}
+          name: wheels-${{ matrix.os }}-${{ matrix.python-version }}
           path: dist/*.whl
 
   sdist:
