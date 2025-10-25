@@ -1,52 +1,28 @@
-name: Build and Publish Wheels
+name: Build and Publish Python Wheels
+
 on:
   push:
+    branches:
+      - main
     tags:
-      - "v[0-9]+.[0-9]+.[0-9]+*"
+      - "v*"
   pull_request:
-  workflow_dispatch:
 
 jobs:
   build-wheels:
-    name: Wheels (${{ matrix.os }} / Py ${{ matrix.python-version }}${{ matrix.target && format(' / {0}', matrix.target) || '' }})
+    name: Build wheels on ${{ matrix.os }} - Python ${{ matrix.python-version }}${{ matrix.target && format(' ({0})', matrix.target) || '' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-22.04, windows-2022, macos-13]
+        python-version: ["3.11", "3.12", "3.13"]
+        target: [""]
         include:
-          # --- Linux x86_64 ---
-          - os: ubuntu-22.04
-            python-version: "3.11"
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-22.04
-            python-version: "3.12"
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-22.04
-            python-version: "3.13"
-            target: x86_64-unknown-linux-gnu
-
-          # --- Linux aarch64 (cross) ---
+          # Add ARM64 Linux build
           - os: ubuntu-22.04
             python-version: "3.11"
             target: aarch64-unknown-linux-gnu
-          - os: ubuntu-22.04
-            python-version: "3.12"
-            target: aarch64-unknown-linux-gnu
-          - os: ubuntu-22.04
-            python-version: "3.13"
-            target: aarch64-unknown-linux-gnu
-
-          # --- macOS (Apple Silicon) ---
-          - os: macos-latest
-            python-version: "3.11"
-          - os: macos-latest
-            python-version: "3.12"
-          - os: macos-latest
-            python-version: "3.13"
-
-          # --- Windows (abi3 only needs one Python) ---
-          - os: windows-latest
-            python-version: "3.11"
 
     steps:
       - uses: actions/checkout@v4
@@ -57,60 +33,18 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Rust toolchain
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-
-      # QEMU only needed when running the manylinux aarch64 container on x86_64 host
-      - name: Set up QEMU (for aarch64 wheels)
-        if: runner.os == 'Linux' && matrix.target == 'aarch64-unknown-linux-gnu'
-        uses: docker/setup-qemu-action@v3
         with:
-          platforms: arm64
-
-      # ----- libclang for bindgen -----
-      - name: Install LLVM (macOS)
-        if: runner.os == 'macOS'
-        run: brew install llvm
-
-      - name: Export LLVM env (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
-          echo "DYLD_FALLBACK_LIBRARY_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
-          echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
+          targets: ${{ matrix.target }}
 
       - name: Install LLVM (Windows)
         if: runner.os == 'Windows'
-        shell: powershell
-        run: choco install -y llvm
+        run: choco install llvm -y
 
-      # Ensure python3.lib exists for the MSVC linker (abi3)
-      - name: Ensure python3.lib (Windows)
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          $libDir = Join-Path $env:pythonLocation "libs"
-          Write-Host "Python libs: $libDir"
-          $candidates = @("python311.lib","python312.lib","python313.lib")
-          $target = Join-Path $libDir "python3.lib"
-          if (-not (Test-Path $target)) {
-            foreach ($c in $candidates) {
-              $src = Join-Path $libDir $c
-              if (Test-Path $src) { Copy-Item $src $target; break }
-            }
-          }
-          if (-not (Test-Path $target)) { Write-Error "python3.lib not found or created." }
-
-      - name: Clean dist directory
-        shell: bash
-        run: rm -rf dist && mkdir -p dist
-
-      # Build wheels
-      - name: Build wheels (maturin)
+      - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
-          # Speedup for *nix when using abi3
-          PYO3_NO_PYTHON: ${{ runner.os != 'Windows' && '1' || '' }}
           # MSVC linker search path for Python import libs
           LIB: ${{ runner.os == 'Windows' && format('{0}\libs', env.pythonLocation) || '' }}
           # Set LIBCLANG_PATH for Windows
@@ -136,18 +70,45 @@ jobs:
             unset CPLUS_INCLUDE_PATH || true
             unset OBJC_INCLUDE_PATH || true
 
-            # Ensure clang/llvm (+ llvm-config if available)
+            # Detect package manager
             PM=""
             for x in microdnf dnf yum apt-get; do
               if command -v "$x" >/dev/null 2>&1; then PM="$x"; break; fi
             done
+
+            # Install dependencies based on package manager
             if [ -n "$PM" ]; then
               if [ "$PM" = "apt-get" ]; then
-                apt-get update && apt-get install -y clang llvm llvm-dev
+                apt-get update
+                apt-get install -y clang llvm llvm-dev
+
+                # Install zlib for cross-compilation if targeting ARM64
+                if [ "${{ matrix.target || '' }}" = "aarch64-unknown-linux-gnu" ]; then
+                  dpkg --add-architecture arm64
+                  apt-get update
+                  apt-get install -y zlib1g-dev:arm64 || apt-get install -y zlib1g-dev
+                else
+                  # Install native zlib headers
+                  apt-get install -y zlib1g-dev
+                fi
               elif [ "$PM" = "microdnf" ]; then
                 microdnf install -y clang llvm-devel || true
+
+                # Install zlib development headers
+                if [ "${{ matrix.target || '' }}" = "aarch64-unknown-linux-gnu" ]; then
+                  microdnf install -y zlib-devel.aarch64 || microdnf install -y zlib-devel || true
+                else
+                  microdnf install -y zlib-devel || true
+                fi
               else
                 $PM install -y clang llvm-devel || true
+
+                # Install zlib development headers
+                if [ "${{ matrix.target || '' }}" = "aarch64-unknown-linux-gnu" ]; then
+                  $PM install -y zlib-devel.aarch64 || $PM install -y zlib-devel || true
+                else
+                  $PM install -y zlib-devel || true
+                fi
               fi
             fi
 
