@@ -90,65 +90,81 @@ fn find_readstat_dir() -> Option<PathBuf> {
 /// Returns `true` if zlib should be used (headers are expected to be found),
 /// and `false` if the build must proceed without zlib (.zsav unsupported).
 fn configure_zlib(build: &mut cc::Build) -> bool {
-    // Manual override (useful in CI or exotic platforms)
-    if let Ok(v) = env::var("READSTAT_WITH_ZLIB") {
+    // Manual override (useful in CI)
+    if let Ok(v) = std::env::var("READSTAT_WITH_ZLIB") {
         let on = v != "0";
+        if on {
+            println!("cargo:rustc-link-lib=z");
+        }
         diag!(
             "READSTAT_WITH_ZLIB override -> {}",
             if on { "ON" } else { "OFF" }
         );
-        if on {
-            println!("cargo:rustc-link-lib=z");
-        }
         return on;
     }
 
-    // Windows: default OFF unless explicitly overridden
+    let target = std::env::var("TARGET").unwrap_or_default();
+    let host = std::env::var("HOST").unwrap_or_default();
+    let cross = target != host;
+
+    // Windows: zlib off by default (unless explicitly provided)
     #[cfg(target_os = "windows")]
     {
-        diag!("Defaulting zlib OFF on Windows (no bundled zlib headers). Set READSTAT_WITH_ZLIB=1 if you provide them.");
+        diag!("Defaulting zlib OFF on Windows (no bundled zlib headers).");
         return false;
     }
 
-    // Try pkg-config first
-    match pkg_config::Config::new().probe("zlib") {
-        Ok(lib) => {
-            diag!("Found zlib via pkg-config");
-            for p in &lib.include_paths {
-                diag!("  zlib include: {}", p.display());
-                build.include(p);
+    // Prefer pkg-config; rely on env to select the correct target tool (e.g.
+    // PKG_CONFIG=aarch64-unknown-linux-gnu-pkg-config, PKG_CONFIG_PATH, etc.).
+    {
+        let mut pc = pkg_config::Config::new();
+        pc.env_metadata(true); // honor PKG_CONFIG*, *_FOR_BUILD, etc.
+
+        match pc.probe("zlib") {
+            Ok(lib) => {
+                diag!("Found zlib via pkg-config (TARGET={target})");
+                for p in &lib.include_paths {
+                    diag!("  zlib include: {}", p.display());
+                    build.include(p);
+                }
+                for p in &lib.link_paths {
+                    diag!("  zlib link:    {}", p.display());
+                    println!("cargo:rustc-link-search=native={}", p.display());
+                }
+                println!("cargo:rustc-link-lib=z");
+                return true;
             }
-            for p in &lib.link_paths {
-                diag!("  zlib link   : {}", p.display());
-                println!("cargo:rustc-link-search=native={}", p.display());
-            }
-            println!("cargo:rustc-link-lib=z");
-            return true;
-        }
-        Err(e) => {
-            diag!("pkg-config zlib not found: {e}");
+            Err(e) => diag!("pkg-config zlib not found (TARGET={target}): {e}"),
         }
     }
 
-    // Heuristic header probe
-    let candidates = &[
-        "/usr/include/zlib.h",
-        "/usr/local/include/zlib.h",
-        // Homebrew
-        "/opt/homebrew/opt/zlib/include/zlib.h",
-        "/usr/local/opt/zlib/include/zlib.h",
-    ];
-    if let Some(hit) = candidates.iter().map(Path::new).find(|p| p.exists()) {
-        if let Some(dir) = hit.parent() {
-            diag!("Found zlib.h at {}", hit.display());
-            build.include(dir);
+    if cross {
+        // IMPORTANT: when cross-compiling, do NOT guess host include dirs.
+        // The cross-compiler's sysroot should provide headers when present.
+        diag!("Cross build: relying on target sysroot for zlib headers");
+        println!("cargo:rustc-link-lib=z");
+        return true;
+    }
+
+    // Native fallback (safe guesses; avoid plain /usr/include)
+    for d in [
+        "/usr/local/include",
+        "/opt/homebrew/opt/zlib/include",
+        "/usr/local/opt/zlib/include",
+    ] {
+        let p = std::path::Path::new(d).join("zlib.h");
+        if p.exists() {
+            diag!("Found zlib.h at {}", p.display());
+            build.include(d);
             println!("cargo:rustc-link-lib=z");
             return true;
         }
     }
 
-    diag!("zlib headers not found; building WITHOUT .zsav support");
-    false
+    // Final native fallback: just link, hope headers are in default include paths.
+    diag!("zlib headers not explicitly found; proceeding with -lz");
+    println!("cargo:rustc-link-lib=z");
+    true
 }
 
 // --- build vendored ReadStat -------------------------------------------------
@@ -181,6 +197,8 @@ fn build_vendored(rs_dir: &Path) {
         "CPATH",
         "READSTAT_SRC",
         "READSTAT_WITH_ZLIB",
+        "PKG_CONFIG",
+        "PKG_CONFIG_ALLOW_CROSS",
     ]);
     diag!("Using ReadStat sources at {}", rs_dir.display());
     diag!("Compiling for TARGET={target} (host={host})");
@@ -323,7 +341,6 @@ readstat_io_t* unistd_io_init(void) { return NULL; }
                 skipped_files.push(format!("{} (Unix I/O)", name));
                 continue;
             }
-            // ensure win I/O is included
             if name == "readstat_io_win.c" {
                 diag!("Including Windows I/O: {}", p.display());
             }
@@ -400,6 +417,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=READSTAT_PREFIX");
     println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
     println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");
+    println!("cargo:rerun-if-env-changed=PKG_CONFIG");
+    println!("cargo:rerun-if-env-changed=PKG_CONFIG_ALLOW_CROSS");
 
     // Prefer vendored build when the feature is enabled
     if cfg!(feature = "vendored") {
