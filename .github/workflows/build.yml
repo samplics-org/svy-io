@@ -8,29 +8,52 @@ on:
 
 jobs:
   build-wheels:
-    name: Wheels (${{ matrix.os }} / Python ${{ matrix.python-version }})
+    name: Wheels (${{ matrix.os }} / Py ${{ matrix.python-version }}${{ matrix.target && format(' / {0}', matrix.target) || '' }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # Building for latest stable macOS runner (which handles both architectures)
-        os: [ubuntu-22.04, macos-latest, windows-latest]
-        python-version: ["3.11", "3.12", "3.13"]
-
-        # FIX: Exclude redundant Windows builds. ABI3 wheel built on 3.11 is sufficient
-        # for 3.12 and 3.13, reducing instability/corruption risk.
-        exclude:
-          - os: windows-latest
+        # We build Linux for BOTH x86_64 and aarch64 so arm64 Docker can use the wheel
+        include:
+          # --- Linux x86_64 ---
+          - os: ubuntu-22.04
+            python-version: "3.11"
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04
             python-version: "3.12"
-          - os: windows-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04
             python-version: "3.13"
+            target: x86_64-unknown-linux-gnu
+
+          # --- Linux aarch64 ---
+          - os: ubuntu-22.04
+            python-version: "3.11"
+            target: aarch64-unknown-linux-gnu
+          - os: ubuntu-22.04
+            python-version: "3.12"
+            target: aarch64-unknown-linux-gnu
+          - os: ubuntu-22.04
+            python-version: "3.13"
+            target: aarch64-unknown-linux-gnu
+
+          # --- macOS (Apple Silicon runner). If you still need Intel mac wheels, add macos-13 too. ---
+          - os: macos-latest
+            python-version: "3.11"
+          - os: macos-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.13"
+
+          # --- Windows (build once on 3.11 for abi3) ---
+          - os: windows-latest
+            python-version: "3.11"
 
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive # Ensures the ReadStat C source is downloaded
 
-      # CRITICAL FIX: Use the matrix variable here to target 3.11, 3.12, and 3.13
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -38,8 +61,14 @@ jobs:
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # ----- libclang for bindgen (needed to parse C headers) -----
+      # --- QEMU only needed when running manylinux aarch64 container on x86_64 runner ---
+      - name: Set up QEMU (for aarch64 wheels)
+        if: runner.os == 'Linux' && matrix.target == 'aarch64-unknown-linux-gnu'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
+      # ----- libclang for bindgen (needed to parse C headers) -----
       - name: Install LLVM (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -57,17 +86,15 @@ jobs:
         shell: powershell
         run: choco install -y llvm
 
-      # FIX: Ensure python3.lib exists for the MSVC linker (Stable ABI requirement)
+      # Ensure python3.lib exists for the MSVC linker (Stable ABI requirement)
       - name: Ensure python3.lib (Windows)
         if: runner.os == 'Windows'
         shell: powershell
         run: |
           $libDir = Join-Path $env:pythonLocation "libs"
           Write-Host "Python libs: $libDir"
-          # PyO3 stable ABI often looks for python3.lib directly.
           $candidates = @("python311.lib","python312.lib","python313.lib")
           $target = Join-Path $libDir "python3.lib"
-
           if (-not (Test-Path $target)) {
             foreach ($c in $candidates) {
               $src = Join-Path $libDir $c
@@ -78,19 +105,17 @@ jobs:
 
       - name: Clean dist directory
         shell: bash
-        # Ensure the directory is clean to prevent artifact corruption/concatenation issues
         run: rm -rf dist && mkdir -p dist
 
       # Build wheels
       - name: Build wheels (maturin)
         uses: PyO3/maturin-action@v1
         env:
-          # PYO3_NO_PYTHON speeds up *nix builds when using abi3
+          # Speedup for *nix when using abi3
           PYO3_NO_PYTHON: ${{ runner.os != 'Windows' && '1' || '' }}
-          # Fix LNK1181 error on Windows by setting the linker search path
+          # MSVC linker search path for Python import libs
           LIB: ${{ runner.os == 'Windows' && format('{0}\libs', env.pythonLocation) || '' }}
-          # Set LIBCLANG_PATH for Windows (relying on global env from choco path)
-          # NOTE: The manual choco install and global export is generally the most stable setup.
+          # Set LIBCLANG_PATH for Windows
           LIBCLANG_PATH: ${{ runner.os == 'Windows' && 'C:\Program Files\LLVM\bin' || env.LIBCLANG_PATH }}
         with:
           command: build
@@ -99,10 +124,12 @@ jobs:
             --out dist
             --features vendored
           manylinux: "2_28"
+          # Pass target for Linux builds so we produce both x86_64 and aarch64 wheels
+          target: ${{ (runner.os == 'Linux') && matrix.target || '' }}
           sccache: true
-          # Install clang/llvm in the manylinux container WITHOUT sudo
           before-script-linux: |
             set -eux
+            # Install clang/llvm inside the manylinux container (no sudo)
             if command -v dnf >/dev/null 2>&1; then
               dnf install -y clang llvm-devel
             elif command -v yum >/dev/null 2>&1; then
@@ -110,14 +137,15 @@ jobs:
             elif command -v apt-get >/dev/null 2>&1; then
               apt-get update && apt-get install -y clang llvm-dev
             fi
-
-            # Find and set LIBCLANG_PATH
+            # LIBCLANG_PATH autodetect
             if [ -f /usr/lib64/libclang.so ]; then
               export LIBCLANG_PATH=/usr/lib64
             elif [ -f /usr/lib/llvm/lib/libclang.so ]; then
               export LIBCLANG_PATH=/usr/lib/llvm/lib
             elif [ -f /usr/lib/x86_64-linux-gnu/libclang.so ]; then
               export LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu
+            elif [ -f /usr/lib/aarch64-linux-gnu/libclang.so ]; then
+              export LIBCLANG_PATH=/usr/lib/aarch64-linux-gnu
             fi
             echo "Using LIBCLANG_PATH=${LIBCLANG_PATH:-unset}"
 
@@ -130,7 +158,7 @@ jobs:
         shell: powershell
         run: Get-ChildItem dist
 
-      # NEW FIX: Validate the integrity of the generated wheel file immediately
+      # Validate wheel integrity (avoid "ZIP archive not accepted: Trailing data")
       - name: Validate wheels (Integrity Check)
         shell: bash
         run: |
@@ -164,11 +192,11 @@ jobs:
           print("OK:", svy_io.__name__, getattr(svy_io, "__version__", "n/a"), _m.__name__)
           PY
 
-      # CRITICAL FIX: Include Python version in artifact name to prevent overwriting
+      # Include target in artifact name to avoid collisions when we build both arches
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}-${{ matrix.python-version }}
+          name: wheels-${{ matrix.os }}-${{ matrix.python-version }}${{ matrix.target && format('-{0}', matrix.target) || '' }}
           path: dist/*.whl
 
   sdist:
@@ -211,7 +239,6 @@ jobs:
           name: sdist
           path: dist
 
-      # Final check before upload, if this fails, we don't upload corrupted file
       - name: Validate wheels (publish)
         shell: bash
         run: |
@@ -219,8 +246,9 @@ jobs:
           import glob, zipfile, sys
           bad = False
           for whl in glob.glob("dist/*.whl"):
-              ok = zipfile.is_zipfile(whl)
-              if not ok: bad = True
+              if not zipfile.is_zipfile(whl):
+                  print("Bad wheel:", whl)
+                  bad = True
           sys.exit(1 if bad else 0)
           PY
 
