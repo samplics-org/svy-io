@@ -1,6 +1,7 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 // --- diagnostics -------------------------------------------------------------
@@ -31,14 +32,67 @@ fn dump_env(keys: &[&str]) {
 
 // --- bindgen ----------------------------------------------------------------
 
+fn detect_sysroot_for_target(target: &str) -> Option<PathBuf> {
+    if let Ok(p) = env::var("BINDGEN_SYSROOT") {
+        let p = PathBuf::from(p);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    for cc in [
+        format!("{target}-gcc"),
+        format!("{target}-clang"),
+        "gcc".to_string(),
+        "clang".to_string(),
+    ] {
+        if let Ok(out) = Command::new(&cc).arg("-print-sysroot").output() {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() && Path::new(&s).exists() {
+                    diag!("Detected sysroot from {cc}: {s}");
+                    return Some(PathBuf::from(s));
+                }
+            }
+        }
+    }
+    None
+}
+
 fn bindgen_with_includes(include_dir: &Path) {
-    let builder = bindgen::Builder::default()
+    let target = env::var("TARGET").unwrap_or_default();
+    let host = env::var("HOST").unwrap_or_default();
+
+    let mut builder = bindgen::Builder::default()
         .header("wrapper.h")
         .allowlist_function("readstat_.*")
         .allowlist_type("readstat_.*")
         .allowlist_var("READSTAT_.*")
         .layout_tests(false)
         .clang_arg(format!("-I{}", include_dir.display()));
+
+    // When cross-compiling to Linux, point clang at the target sysroot to avoid host headers
+    if target != host && target.contains("linux") {
+        if let Some(sysroot) = detect_sysroot_for_target(&target) {
+            builder = builder
+                .clang_arg(format!("--sysroot={}", sysroot.display()))
+                .clang_arg(format!("-I{}/usr/include", sysroot.display()));
+            let trip_inc = if target.starts_with("aarch64") {
+                "aarch64-linux-gnu"
+            } else if target.starts_with("x86_64") {
+                "x86_64-linux-gnu"
+            } else {
+                ""
+            };
+            if !trip_inc.is_empty() {
+                builder = builder.clang_arg(format!(
+                    "-I{}/usr/include/{}",
+                    sysroot.display(),
+                    trip_inc
+                ));
+            }
+            diag!("bindgen using sysroot {}", sysroot.display());
+        }
+    }
 
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     builder
@@ -78,54 +132,112 @@ fn find_readstat_dir() -> Option<PathBuf> {
 
 // --- zlib detection / configuration -----------------------------------------
 
-/// Returns `true` if zlib is configured and headers will be found.
+fn link_static_z_from_dir(dir: &Path) {
+    println!("cargo:rustc-link-search=native={}", dir.display());
+    #[cfg(target_os = "windows")]
+    {
+        // Pick the actual name present
+        let z = dir.join("z.lib");
+        let zstatic = dir.join("zlibstatic.lib");
+        if zstatic.exists() {
+            println!("cargo:rustc-link-lib=static=zlibstatic");
+        } else if z.exists() {
+            println!("cargo:rustc-link-lib=static=z");
+        } else {
+            // Fall back, usually works with zlib-src
+            println!("cargo:rustc-link-lib=static=z");
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // On Unix the static lib is typically libz.a
+        println!("cargo:rustc-link-lib=static=z");
+    }
+}
+
+/// Configure zlib for the C build if available.
+/// Prefer DEP_Z_* (from zlib-src or libz-sys), then pkg-config, then sysroot.
 fn configure_zlib(build: &mut cc::Build) -> bool {
-    // Manual override
     if let Ok(v) = env::var("READSTAT_WITH_ZLIB") {
         let on = v != "0";
         if on {
             println!("cargo:rustc-link-lib=z");
         }
-        diag!(
-            "READSTAT_WITH_ZLIB override -> {}",
-            if on { "ON" } else { "OFF" }
-        );
+        diag!("READSTAT_WITH_ZLIB override -> {}", if on { "ON" } else { "OFF" });
         return on;
     }
 
-    // Prefer zlib bundled via libz-sys (static or shared).
-    if let Ok(inc) = env::var("DEP_Z_INCLUDE") {
-        let p = PathBuf::from(inc);
-        diag!("Using zlib from libz-sys include: {}", p.display());
-        build.include(&p);
-        // libz-sys already emits link args; don't add another here.
+    // 0) zlib built by zlib-src or libz-sys (both export DEP_Z_*)
+    let dep_z_include = env::var("DEP_Z_INCLUDE").ok();
+    let dep_z_root = env::var("DEP_Z_ROOT").ok();
+    let dep_z_lib = env::var("DEP_Z_LIB").ok();
+    if dep_z_include.is_some() || dep_z_root.is_some() || dep_z_lib.is_some() {
+        if let Some(inc) = dep_z_include.as_deref() {
+            diag!("Using zlib headers from DEP_Z_INCLUDE={inc}");
+            build.include(inc);
+        }
+        if let Some(lib) = dep_z_lib.as_deref() {
+            diag!("Using zlib lib dir from DEP_Z_LIB={lib}");
+            link_static_z_from_dir(Path::new(lib));
+        } else if let Some(root) = dep_z_root.as_deref() {
+            for cand in ["lib", "lib64", ""].iter() {
+                let p = Path::new(root).join(cand);
+                if p.exists() {
+                    diag!("Using zlib lib dir {}", p.display());
+                    link_static_z_from_dir(&p);
+                    break;
+                }
+            }
+            if dep_z_include.is_none() {
+                let inc = Path::new(root).join("include");
+                if inc.exists() {
+                    diag!("Using zlib headers from {}", inc.display());
+                    build.include(inc);
+                }
+            }
+        }
         return true;
     }
 
-    // Try pkg-config (honors PKG_CONFIG_* and cross env)
-    {
-        let mut pc = pkg_config::Config::new();
-        pc.env_metadata(true);
-        match pc.probe("zlib") {
-            Ok(lib) => {
-                diag!("Found zlib via pkg-config");
-                for p in &lib.include_paths {
-                    diag!("  zlib include: {}", p.display());
-                    build.include(p);
-                }
-                for p in &lib.link_paths {
-                    diag!("  zlib link:    {}", p.display());
-                    println!("cargo:rustc-link-search=native={}", p.display());
-                }
-                println!("cargo:rustc-link-lib=z");
-                return true;
-            }
-            Err(e) => diag!("pkg-config zlib not found: {e}"),
+    // 1) pkg-config (native)
+    if let Ok(lib) = pkg_config::Config::new().env_metadata(true).probe("zlib") {
+        diag!("Found zlib via pkg-config");
+        for p in &lib.include_paths {
+            diag!("  zlib include: {}", p.display());
+            build.include(p);
+        }
+        for p in &lib.link_paths {
+            diag!("  zlib link:    {}", p.display());
+            println!("cargo:rustc-link-search=native={}", p.display());
+        }
+        println!("cargo:rustc-link-lib=z");
+        return true;
+    }
+
+    // 2) Cross build: rely on target sysroot; link dynamically
+    let target = env::var("TARGET").unwrap_or_default();
+    let host = env::var("HOST").unwrap_or_default();
+    if target != host {
+        diag!("Cross build: using target sysroot zlib (dynamic)");
+        println!("cargo:rustc-link-lib=z");
+        return true;
+    }
+
+    // 3) Native fallbacks
+    for d in [
+        "/usr/local/include",
+        "/opt/homebrew/opt/zlib/include",
+        "/usr/local/opt/zlib/include",
+    ] {
+        if Path::new(d).join("zlib.h").exists() {
+            diag!("Found zlib.h at {}", d);
+            build.include(d);
+            println!("cargo:rustc-link-lib=z");
+            return true;
         }
     }
 
-    // Final fallback: just link -lz and rely on toolchain defaults.
-    diag!("zlib headers not explicitly found; proceeding with -lz");
+    diag!("Proceeding without explicit zlib headers; linking -lz");
     println!("cargo:rustc-link-lib=z");
     true
 }
@@ -142,9 +254,10 @@ fn build_vendored(rs_dir: &Path) {
     );
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+
     let mut build = cc::Build::new();
 
-    // Diagnostics
+    // Summarize environment (only if debug enabled)
     let target = env::var("TARGET").unwrap_or_default();
     let host = env::var("HOST").unwrap_or_default();
     dump_env(&[
@@ -153,7 +266,6 @@ fn build_vendored(rs_dir: &Path) {
         "HOST",
         "CFLAGS",
         "LIBCLANG_PATH",
-        "PKG_CONFIG",
         "PKG_CONFIG_PATH",
         "PKG_CONFIG_SYSROOT_DIR",
         "PKG_CONFIG_LIBDIR",
@@ -161,19 +273,22 @@ fn build_vendored(rs_dir: &Path) {
         "CPATH",
         "READSTAT_SRC",
         "READSTAT_WITH_ZLIB",
+        "PKG_CONFIG",
         "PKG_CONFIG_ALLOW_CROSS",
         "DEP_Z_INCLUDE",
         "DEP_Z_ROOT",
+        "DEP_Z_LIB",
+        "BINDGEN_SYSROOT",
     ]);
     diag!("Using ReadStat sources at {}", rs_dir.display());
     diag!("Compiling for TARGET={target} (host={host})");
 
-    // Our includes first (stubs can win on Windows)
+    // Put OUT_DIR first so our stub headers win on Windows
     build.include(&out_dir);
     build.include(&inc_dir);
     build.include(&rs_dir);
 
-    // Minimal config.h defines
+    // Minimal config.h stand-ins
     build.define("HAVE_STDDEF_H", Some("1"));
     build.define("HAVE_STDINT_H", Some("1"));
     build.define("HAVE_INTTYPES_H", Some("1"));
@@ -181,7 +296,7 @@ fn build_vendored(rs_dir: &Path) {
     build.define("HAVE_STRING_H", Some("1"));
     build.define("HAVE_STRINGS_H", Some("1"));
 
-    // zlib setup
+    // zlib detection
     let has_zlib = configure_zlib(&mut build);
     if has_zlib {
         build.define("READSTAT_HAVE_ZLIB", Some("1"));
@@ -193,9 +308,10 @@ fn build_vendored(rs_dir: &Path) {
         diag!("Building WITHOUT zlib support (.zsav disabled)");
     }
 
-    // iconv
+    // iconv availability + stubs for Windows
     if cfg!(target_os = "windows") {
         build.define("HAVE_ICONV", Some("0"));
+
         let stub_h = out_dir.join("iconv.h");
         fs::write(
             &stub_h,
@@ -211,46 +327,67 @@ typedef void* iconv_t;
         .expect("write iconv.h stub");
 
         let stub_c = out_dir.join("posix_stubs.c");
-        fs::write(&stub_c, r#"
+        fs::write(
+            &stub_c,
+            r#"
 #include <stddef.h>
 #include <errno.h>
+
 typedef void* iconv_t;
-iconv_t iconv_open(const char* tocode, const char* fromcode){(void)tocode;(void)fromcode;return (iconv_t)-1;}
-int iconv_close(iconv_t cd){(void)cd;return 0;}
-size_t iconv(iconv_t cd, const char** inbuf, size_t* inbytesleft, char** outbuf, size_t* outbytesleft){
-  (void)cd;(void)inbuf;(void)inbytesleft;(void)outbuf;(void)outbytesleft;errno=EINVAL;return (size_t)-1;}
+
+iconv_t iconv_open(const char* tocode, const char* fromcode) {
+    (void)tocode; (void)fromcode; return (iconv_t)-1;
+}
+
+int iconv_close(iconv_t cd) { (void)cd; return 0; }
+
+size_t iconv(iconv_t cd, const char** inbuf, size_t* inbytesleft,
+             char** outbuf, size_t* outbytesleft) {
+    (void)cd; (void)inbuf; (void)inbytesleft; (void)outbuf; (void)outbytesleft;
+    errno = EINVAL; return (size_t)-1;
+}
+
+// Fallback for Windows I/O init (real symbol lives in readstat_io_win.c)
 typedef struct readstat_io_s readstat_io_t;
-readstat_io_t* unistd_io_init(void){return NULL;}
-"#).expect("write posix_stubs.c");
+readstat_io_t* unistd_io_init(void) { return NULL; }
+"#,
+        )
+        .expect("write posix_stubs.c");
+
         build.file(&stub_c);
         println!("cargo:rerun-if-changed={}", stub_c.display());
+        diag!("Created POSIX stubs for Windows");
     } else {
         build.define("HAVE_ICONV", Some("1"));
         #[cfg(target_os = "macos")]
-        println!("cargo:rustc-link-lib=iconv");
+        {
+            println!("cargo:rustc-link-lib=iconv");
+            diag!("Linking with -liconv (macOS)");
+        }
     }
 
-    // Force-include readstat.h for all C units
+    // Force-include readstat.h for all translation units
     if cfg!(target_env = "msvc") {
         build.flag("/FIreadstat.h");
     } else {
         build.flag("-include").flag("readstat.h");
     }
 
-    // Gather sources
+    // Collect C files
     let mut files: Vec<PathBuf> = Vec::new();
-    let mut skipped: Vec<String> = Vec::new();
+    let mut skipped_files: Vec<String> = Vec::new();
+
     for entry in walkdir::WalkDir::new(&src_dir) {
         let entry = entry.unwrap();
+        let p = entry.path();
         if !entry.file_type().is_file() {
             continue;
         }
-        let p = entry.path();
         if p.extension().and_then(|s| s.to_str()) != Some("c") {
             continue;
         }
+
         let rel = p.strip_prefix(&src_dir).unwrap();
-        let name = rel.file_name().and_then(|s| s.to_str()).unwrap_or("");
 
         let skip_dir = rel.components().any(|c| {
             matches!(
@@ -262,13 +399,15 @@ readstat_io_t* unistd_io_init(void){return NULL;}
             continue;
         }
 
+        let name = rel.file_name().and_then(|s| s.to_str()).unwrap_or("");
+
         if cfg!(target_os = "windows") {
             if name == "readstat_io_unistd.c" {
-                skipped.push(format!("{} (Unix I/O)", name));
+                skipped_files.push(format!("{} (Unix I/O)", name));
                 continue;
             }
         } else if name == "readstat_io_win.c" {
-            skipped.push(format!("{} (Windows I/O)", name));
+            skipped_files.push(format!("{} (Windows I/O)", name));
             continue;
         }
 
@@ -277,17 +416,17 @@ readstat_io_t* unistd_io_init(void){return NULL;}
                 || name == "readstat_zsav_read.c"
                 || name == "readstat_zsav_write.c")
         {
-            skipped.push(format!("{} (requires zlib)", name));
+            skipped_files.push(format!("{} (requires zlib)", name));
             continue;
         }
 
         files.push(p.to_path_buf());
     }
 
-    if !skipped.is_empty() {
-        diag!("Skipping {} files:", skipped.len());
-        for s in &skipped {
-            diag!("  - {s}");
+    if !skipped_files.is_empty() {
+        diag!("Skipping {} files:", skipped_files.len());
+        for f in &skipped_files {
+            diag!("  - {}", f);
         }
     }
     diag!("Compiling {} C source files", files.len());
@@ -300,6 +439,7 @@ readstat_io_t* unistd_io_init(void){return NULL;}
     build.define("READSTAT_VERSION", Some("\"vendored\""));
     build.warnings(false).compile("readstat");
 
+    // Generate Rust bindings
     bindgen_with_includes(&inc_dir);
 }
 
@@ -341,6 +481,9 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");
     println!("cargo:rerun-if-env-changed=PKG_CONFIG_ALLOW_CROSS");
     println!("cargo:rerun-if-env-changed=DEP_Z_INCLUDE");
+    println!("cargo:rerun-if-env-changed=DEP_Z_ROOT");
+    println!("cargo:rerun-if-env-changed=DEP_Z_LIB");
+    println!("cargo:rerun-if-env-changed=BINDGEN_SYSROOT");
 
     if cfg!(feature = "vendored") {
         if let Some(dir) = find_readstat_dir() {

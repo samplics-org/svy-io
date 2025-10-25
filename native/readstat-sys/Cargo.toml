@@ -13,10 +13,11 @@ bindgen = "0.70"
 pkg-config = "0.3"
 cc = "1"
 walkdir = "2"          # <- to glob C sources in vendored mode
+# zlib = { version = "1.1", features = ["static"] }
+libz-sys = { version = "1.1", default-features = false, features = ["libc"] }
 
 [dependencies]
 libc = "0.2"
-libz-sys = { version = "1.1", features = ["static"] }
 
 [features]
 # Default to vendored in CI; you can leave it off locally if you prefer system libs
