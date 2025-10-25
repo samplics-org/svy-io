@@ -52,20 +52,15 @@ jobs:
         shell: powershell
         run: choco install -y llvm
 
-      # REMOVED: Export LLVM env (Windows)
-      # Relying on choco install to set up paths or Maturin/bindgen to find LLVM
-
-      # REMOVED: Configure Python paths (Windows)
-      # Maturin should automatically find the correct Python libs when actions/setup-python is used.
-
       # Build wheels
       - name: Build wheels (maturin)
         uses: PyO3/maturin-action@v1
         env:
           # Only set PYO3_NO_PYTHON on Linux/macOS
           PYO3_NO_PYTHON: ${{ runner.os != 'Windows' && '1' || '' }}
-          # Use a more explicit way to set LIBCLANG_PATH for Windows if needed
-          LIBCLANG_PATH: C:\Program Files\LLVM\bin # Re-adds the path directly to the action environment
+          # FIX: Re-adds the Windows LIBCLANG_PATH as an environment variable
+          # but does NOT override the globally set LIBCLANG_PATH for macOS.
+          LIBCLANG_PATH: ${{ runner.os == 'Windows' && 'C:\Program Files\LLVM\bin' || env.LIBCLANG_PATH }}
         with:
           command: build
           args: >-
