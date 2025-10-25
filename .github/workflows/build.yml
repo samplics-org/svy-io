@@ -2,7 +2,7 @@ name: Build and Publish Wheels
 on:
   push:
     tags:
-      - "v[0-9]+.[0-9]+.[0-9]+*" # Only run release on version tags
+      - "v[0-9]+.[0-9]+.[0-9]+*"
   pull_request:
   workflow_dispatch:
 
@@ -25,7 +25,7 @@ jobs:
             python-version: "3.13"
             target: x86_64-unknown-linux-gnu
 
-          # --- Linux aarch64 ---
+          # --- Linux aarch64 (cross) ---
           - os: ubuntu-22.04
             python-version: "3.11"
             target: aarch64-unknown-linux-gnu
@@ -44,7 +44,7 @@ jobs:
           - os: macos-latest
             python-version: "3.13"
 
-          # --- Windows (build once on 3.11 for abi3) ---
+          # --- Windows (abi3 only needs one Python) ---
           - os: windows-latest
             python-version: "3.11"
 
@@ -109,12 +109,18 @@ jobs:
       - name: Build wheels (maturin)
         uses: PyO3/maturin-action@v1
         env:
-          # Speedup for *nix when using abi3
+          # Faster abi3 builds on *nix
           PYO3_NO_PYTHON: ${{ runner.os != 'Windows' && '1' || '' }}
           # MSVC linker search path for Python import libs
           LIB: ${{ runner.os == 'Windows' && format('{0}\libs', env.pythonLocation) || '' }}
           # Set LIBCLANG_PATH for Windows
           LIBCLANG_PATH: ${{ runner.os == 'Windows' && 'C:\Program Files\LLVM\bin' || env.LIBCLANG_PATH }}
+          # Our build.rs diagnostics
+          READSTAT_BUILD_DEBUG: "1"
+          # Allow pkg-config to work in cross mode
+          PKG_CONFIG_ALLOW_CROSS: "1"
+          # Surface the matrix target to the before-script
+          MATURIN_TARGET: ${{ matrix.target }}
         with:
           command: build
           args: >-
@@ -124,19 +130,45 @@ jobs:
           manylinux: "2_28"
           # Produce both x86_64 and aarch64 wheels on Linux
           target: ${{ (runner.os == 'Linux') && matrix.target || '' }}
-          sccache: true
+          # sccache is flaky on macOS (ServerBusy) → disable there only
+          sccache: ${{ runner.os != 'macOS' }}
           before-script-linux: |
             set -eux
-            # Install clang/llvm + zlib headers INSIDE the manylinux container (no sudo there)
-            if command -v dnf >/dev/null 2>&1; then
-              dnf install -y clang llvm-devel zlib-devel
-            elif command -v yum >/dev/null 2>&1; then
-              yum install -y clang llvm-devel zlib-devel
-            elif command -v apt-get >/dev/null 2>&1; then
-              apt-get update && apt-get install -y clang llvm-dev zlib1g-dev
+
+            # Defensive: do not leak host include paths into cross builds
+            unset CPATH || true
+            unset C_INCLUDE_PATH || true
+            unset CPLUS_INCLUDE_PATH || true
+            unset OBJC_INCLUDE_PATH || true
+
+            if [ "${MATURIN_TARGET:-}" = "aarch64-unknown-linux-gnu" ]; then
+              # aarch64 cross sysroot in the manylinux_2_28-cross image
+              SYSROOT="/usr/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot"
+
+              # Install target headers into the TARGET sysroot (not host!)
+              dnf install -y \
+                --installroot="$SYSROOT" \
+                --releasever=9 \
+                --forcearch=aarch64 \
+                --setopt=install_weak_deps=False \
+                --setopt=tsflags=nodocs \
+                zlib-devel glibc-headers glibc-devel
+
+              # Point pkg-config at the TARGET sysroot so zlib resolves correctly
+              export PKG_CONFIG_SYSROOT_DIR="$SYSROOT"
+              export PKG_CONFIG_DIR=
+              export PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib64/pkgconfig:$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig"
+
+              # Sanity check: must print target paths and succeed
+              pkg-config --print-errors --cflags --libs zlib
+
+            else
+              # Native x86_64 build inside manylinux: install host headers
+              dnf install -y zlib-devel clang llvm-devel
+              pkg-config --print-errors --cflags --libs zlib
             fi
 
-            # LIBCLANG_PATH autodetect
+            # Best effort LIBCLANG_PATH autodetect (not critical when bindgen uses system clang)
             if [ -f /usr/lib64/libclang.so ]; then
               export LIBCLANG_PATH=/usr/lib64
             elif [ -f /usr/lib/llvm/lib/libclang.so ]; then
@@ -157,7 +189,7 @@ jobs:
         shell: powershell
         run: Get-ChildItem dist
 
-      # Validate wheel integrity (avoid "ZIP archive not accepted: Trailing data")
+      # Validate wheel integrity
       - name: Validate wheels (Integrity Check)
         shell: bash
         run: |

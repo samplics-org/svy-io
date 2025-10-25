@@ -86,9 +86,7 @@ fn find_readstat_dir() -> Option<PathBuf> {
 // --- zlib detection / configuration -----------------------------------------
 
 /// Configure zlib for the C build if available.
-///
-/// Returns `true` if zlib should be used (headers are expected to be found),
-/// and `false` if the build must proceed without zlib (.zsav unsupported).
+/// Returns `true` if zlib should be used (headers are expected to be found).
 fn configure_zlib(build: &mut cc::Build) -> bool {
     // Manual override (useful in CI)
     if let Ok(v) = std::env::var("READSTAT_WITH_ZLIB") {
@@ -114,12 +112,10 @@ fn configure_zlib(build: &mut cc::Build) -> bool {
         return false;
     }
 
-    // Prefer pkg-config; rely on env to select the correct target tool (e.g.
-    // PKG_CONFIG=aarch64-unknown-linux-gnu-pkg-config, PKG_CONFIG_PATH, etc.).
+    // Prefer pkg-config; honor cross env (PKG_CONFIG*, *_SYSROOT_DIR, etc.)
     {
         let mut pc = pkg_config::Config::new();
-        pc.env_metadata(true); // honor PKG_CONFIG*, *_FOR_BUILD, etc.
-
+        pc.env_metadata(true);
         match pc.probe("zlib") {
             Ok(lib) => {
                 diag!("Found zlib via pkg-config (TARGET={target})");
@@ -139,8 +135,8 @@ fn configure_zlib(build: &mut cc::Build) -> bool {
     }
 
     if cross {
-        // IMPORTANT: when cross-compiling, do NOT guess host include dirs.
-        // The cross-compiler's sysroot should provide headers when present.
+        // When cross-compiling, do NOT guess host include dirs.
+        // Rely on the target sysroot; the CI sets it up.
         diag!("Cross build: relying on target sysroot for zlib headers");
         println!("cargo:rustc-link-lib=z");
         return true;
@@ -161,7 +157,7 @@ fn configure_zlib(build: &mut cc::Build) -> bool {
         }
     }
 
-    // Final native fallback: just link, hope headers are in default include paths.
+    // Final native fallback
     diag!("zlib headers not explicitly found; proceeding with -lz");
     println!("cargo:rustc-link-lib=z");
     true
@@ -191,13 +187,14 @@ fn build_vendored(rs_dir: &Path) {
         "HOST",
         "CFLAGS",
         "LIBCLANG_PATH",
+        "PKG_CONFIG",
         "PKG_CONFIG_PATH",
         "PKG_CONFIG_SYSROOT_DIR",
+        "PKG_CONFIG_LIBDIR",
         "LIBRARY_PATH",
         "CPATH",
         "READSTAT_SRC",
         "READSTAT_WITH_ZLIB",
-        "PKG_CONFIG",
         "PKG_CONFIG_ALLOW_CROSS",
     ]);
     diag!("Using ReadStat sources at {}", rs_dir.display());
@@ -415,9 +412,11 @@ fn main() {
     println!("cargo:rerun-if-env-changed=READSTAT_SRC");
     println!("cargo:rerun-if-env-changed=READSTAT_WITH_ZLIB");
     println!("cargo:rerun-if-env-changed=READSTAT_PREFIX");
-    println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
-    println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");
     println!("cargo:rerun-if-env-changed=PKG_CONFIG");
+    println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
+    println!("cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR");
+    println!("cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR");
+    println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");
     println!("cargo:rerun-if-env-changed=PKG_CONFIG_ALLOW_CROSS");
 
     // Prefer vendored build when the feature is enabled
