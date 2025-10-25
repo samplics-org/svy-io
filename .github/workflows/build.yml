@@ -115,10 +115,8 @@ jobs:
           LIB: ${{ runner.os == 'Windows' && format('{0}\libs', env.pythonLocation) || '' }}
           # Set LIBCLANG_PATH for Windows
           LIBCLANG_PATH: ${{ runner.os == 'Windows' && 'C:\Program Files\LLVM\bin' || env.LIBCLANG_PATH }}
-          # Helpful diagnostics
+          # diagnostics
           READSTAT_BUILD_DEBUG: "1"
-          # macOS: avoid flaky sccache remote
-          SCCACHE_GHA_ENABLED: ${{ runner.os == 'MacOS' && '0' || '1' }}
         with:
           command: build
           args: >-
@@ -127,7 +125,8 @@ jobs:
             --features vendored
           manylinux: "2_28"
           target: ${{ (runner.os == 'Linux') && matrix.target || '' }}
-          sccache: true
+          # sccache can be flaky on macOS runners (remote storage).
+          sccache: ${{ runner.os != 'macOS' }}
           before-script-linux: |
             set -eux
 
@@ -137,14 +136,14 @@ jobs:
             unset CPLUS_INCLUDE_PATH || true
             unset OBJC_INCLUDE_PATH || true
 
-            # Ensure clang/llvm (bindgen)
+            # Ensure clang/llvm (+ llvm-config if available)
             PM=""
             for x in microdnf dnf yum apt-get; do
               if command -v "$x" >/dev/null 2>&1; then PM="$x"; break; fi
             done
             if [ -n "$PM" ]; then
               if [ "$PM" = "apt-get" ]; then
-                apt-get update && apt-get install -y clang llvm-dev
+                apt-get update && apt-get install -y clang llvm llvm-dev
               elif [ "$PM" = "microdnf" ]; then
                 microdnf install -y clang llvm-devel || true
               else
@@ -152,24 +151,24 @@ jobs:
               fi
             fi
 
-            # libclang detection for bindgen
-            if [ -f /usr/lib64/libclang.so ]; then
-              export LIBCLANG_PATH=/usr/lib64
-            elif [ -f /usr/lib/llvm/lib/libclang.so ]; then
-              export LIBCLANG_PATH=/usr/lib/llvm/lib
-            elif [ -f /usr/lib/x86_64-linux-gnu/libclang.so ]; then
-              export LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu
-            elif [ -f /usr/lib/aarch64-linux-gnu/libclang.so ]; then
-              export LIBCLANG_PATH=/usr/lib/aarch64-linux-gnu
+            # libclang discovery for bindgen
+            if command -v llvm-config >/dev/null 2>&1; then
+              export LIBCLANG_PATH="$(llvm-config --libdir || true)"
             fi
-            echo "Using LIBCLANG_PATH=${LIBCLANG_PATH:-unset}"
+            if [ -z "${LIBCLANG_PATH:-}" ]; then
+              for d in /usr/lib64 /usr/lib/llvm/lib /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu; do
+                if [ -f "$d/libclang.so" ]; then export LIBCLANG_PATH="$d"; break; fi
+              done
+            fi
+            echo "LIBCLANG_PATH=${LIBCLANG_PATH:-unset}"
 
-            # If cross-compiling, pass sysroot to bindgen via env (build.rs also auto-detects)
+            # If cross-compiling, pass sysroot to bindgen via *export* (don't write $GITHUB_ENV inside container)
             if [ "${{ matrix.target || '' }}" = "aarch64-unknown-linux-gnu" ]; then
               if command -v aarch64-unknown-linux-gnu-gcc >/dev/null 2>&1; then
-                SYSROOT=$(aarch64-unknown-linux-gnu-gcc -print-sysroot || true)
+                SYSROOT="$(aarch64-unknown-linux-gnu-gcc -print-sysroot || true)"
                 if [ -n "$SYSROOT" ] && [ -d "$SYSROOT" ]; then
-                  echo "BINDGEN_SYSROOT=$SYSROOT" >> "$GITHUB_ENV"
+                  export BINDGEN_SYSROOT="$SYSROOT"
+                  echo "BINDGEN_SYSROOT=$BINDGEN_SYSROOT"
                 fi
               fi
             fi

@@ -136,7 +136,6 @@ fn link_static_z_from_dir(dir: &Path) {
     println!("cargo:rustc-link-search=native={}", dir.display());
     #[cfg(target_os = "windows")]
     {
-        // Pick the actual name present
         let z = dir.join("z.lib");
         let zstatic = dir.join("zlibstatic.lib");
         if zstatic.exists() {
@@ -144,19 +143,17 @@ fn link_static_z_from_dir(dir: &Path) {
         } else if z.exists() {
             println!("cargo:rustc-link-lib=static=z");
         } else {
-            // Fall back, usually works with zlib-src
             println!("cargo:rustc-link-lib=static=z");
         }
     }
     #[cfg(not(target_os = "windows"))]
     {
-        // On Unix the static lib is typically libz.a
         println!("cargo:rustc-link-lib=static=z");
     }
 }
 
 /// Configure zlib for the C build if available.
-/// Prefer DEP_Z_* (from zlib-src or libz-sys), then pkg-config, then sysroot.
+/// Prefer DEP_Z_* (from libz-sys), then pkg-config, then sysroot.
 fn configure_zlib(build: &mut cc::Build) -> bool {
     if let Ok(v) = env::var("READSTAT_WITH_ZLIB") {
         let on = v != "0";
@@ -167,7 +164,7 @@ fn configure_zlib(build: &mut cc::Build) -> bool {
         return on;
     }
 
-    // 0) zlib built by zlib-src or libz-sys (both export DEP_Z_*)
+    // 0) zlib built by libz-sys (exports DEP_Z_*)
     let dep_z_include = env::var("DEP_Z_INCLUDE").ok();
     let dep_z_root = env::var("DEP_Z_ROOT").ok();
     let dep_z_lib = env::var("DEP_Z_LIB").ok();
