@@ -62,6 +62,7 @@ jobs:
           # to the Python import libraries folder.
           LIB: ${{ runner.os == 'Windows' && format('{0}\libs', env.pythonLocation) || '' }}
           # Set LIBCLANG_PATH for Windows
+          # NOTE: Using a simple path here assumes choco installation is consistent.
           LIBCLANG_PATH: ${{ runner.os == 'Windows' && 'C:\Program Files\LLVM\bin' || env.LIBCLANG_PATH }}
         with:
           command: build
