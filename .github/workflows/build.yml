@@ -58,8 +58,10 @@ jobs:
         env:
           # Only set PYO3_NO_PYTHON on Linux/macOS
           PYO3_NO_PYTHON: ${{ runner.os != 'Windows' && '1' || '' }}
-          # FIX: Re-adds the Windows LIBCLANG_PATH as an environment variable
-          # but does NOT override the globally set LIBCLANG_PATH for macOS.
+          # Fix LNK1181 error on Windows by explicitly setting the LIB path
+          # to the Python import libraries folder.
+          LIB: ${{ runner.os == 'Windows' && format('{0}\libs', env.pythonLocation) || '' }}
+          # Set LIBCLANG_PATH for Windows
           LIBCLANG_PATH: ${{ runner.os == 'Windows' && 'C:\Program Files\LLVM\bin' || env.LIBCLANG_PATH }}
         with:
           command: build
