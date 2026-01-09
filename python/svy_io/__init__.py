@@ -71,4 +71,4 @@ __all__ = [
     "write_xpt",
 ]
 
-__version__ = "0.0.10a"
+__version__ = "0.1.0"

@@ -1,7 +1,7 @@
 # ./pyproject.toml
 [project]
 name = "svy-io"
-version = "0.0.10a"
+version = "0.1.0"
 description = "SAS/SPSS/Stata I/O with Polars, powered by ReadStat + PyO3"
 homepage = "https://svylab.com/docs/svy-io"
 readme = "README.md"
@@ -11,7 +11,7 @@ classifiers = [
   "License :: OSI Approved :: MIT License",
 ]
 requires-python = ">=3.11"
-dependencies = ["polars>=1.34.0", "pyarrow>=21"]
+dependencies = ["polars[pyarrow]>=1.34.0"]
 
 [build-system]
 requires = ["maturin>=1.5,<2.0"]
